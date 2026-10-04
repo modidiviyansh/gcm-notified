@@ -1,6 +1,6 @@
 import { ReactNode, useEffect, useState } from 'react';
 import { api, fmtDate } from '../api';
-import { Phone, RevealAll } from '../components/phone';
+import { WaMark, Phone, RevealAll } from '../components/phone';
 import { CsvImport, ListRulesModal, PersonModal, PhoneList } from '../components/people';
 import type { NumberRule } from '../components/rules';
 import { Badge, Card, Empty, ErrorNote, Field, Modal, PageHeader, useLoad, useToast } from '../components/ui';
@@ -333,8 +333,8 @@ function Students({ group }: { group: GroupNode }) {
                 <td className="font-mono text-xs">{s.admission_no}</td>
                 <td>{s.student_name}</td>
                 <td className="text-xs">{s.section ?? '—'}</td>
-                <td className="text-xs">{s.father_name}<br /><Phone value={s.father_phone} className="text-slate-500" missing={<span className="text-red-500">missing</span>} />{s.father_opted_out && <Badge tone="amber">opted out</Badge>}</td>
-                <td className="text-xs">{s.mother_name}<br /><Phone value={s.mother_phone} className="text-slate-500" missing={<span className="text-red-500">missing</span>} />{s.mother_opted_out && <Badge tone="amber">opted out</Badge>}</td>
+                <td className="text-xs">{s.father_name}<br /><Phone value={s.father_phone} className="text-slate-500" missing={<span className="text-red-500">missing</span>} /> <WaMark wa={s.father_wa} />{s.father_opted_out && <Badge tone="amber">opted out</Badge>}</td>
+                <td className="text-xs">{s.mother_name}<br /><Phone value={s.mother_phone} className="text-slate-500" missing={<span className="text-red-500">missing</span>} /> <WaMark wa={s.mother_wa} />{s.mother_opted_out && <Badge tone="amber">opted out</Badge>}</td>
               </tr>))}</tbody>
           </table>
         </div>

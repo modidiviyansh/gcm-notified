@@ -5,6 +5,12 @@ import { Db } from '../db/db.service';
 import { SettingsService } from '../settings/settings.service';
 import { normalizePhone } from '../common/phone';
 
+export class FrappeAccessError extends Error {
+  constructor(readonly doctype: string) {
+    super(`Frappe ${doctype} → HTTP 403: the GCM Notified API user is not allowed to read "${doctype}" yet. Give its role read permission on ${doctype} in Frappe.`);
+  }
+}
+
 const CLASS_ORDER = ['PRE-NURSERY', 'NURSERY', 'LKG', 'UKG', '1ST', '2ND', '3RD', '4TH', '5TH', '6TH', '7TH', '8TH', '9TH', '10TH', '11TH', '12TH'];
 
 @Injectable()
@@ -30,12 +36,14 @@ export class FrappeSyncService implements OnApplicationBootstrap {
     if (!last || Date.now() - last.started_at.getTime() > every * 3600_000) await this.sync().catch((e) => this.log.error(e.message));
   }
 
-  private async get<T = any>(doctype: string, fields: string[], filters?: unknown[]): Promise<T[]> {
+  /** Reads a doctype from Frappe (all rows). Used by the sync and by 1-Click notifications. */
+  async get<T = any>(doctype: string, fields: string[], filters?: unknown[]): Promise<T[]> {
     const q = new URLSearchParams({ fields: JSON.stringify(fields), limit_page_length: '0' });
     if (filters) q.set('filters', JSON.stringify(filters));
     const res = await fetch(`${config.frappeUrl}/api/resource/${encodeURIComponent(doctype)}?${q}`, {
       headers: { Authorization: `token ${config.frappeApiKey}:${config.frappeApiSecret}`, Accept: 'application/json' },
     });
+    if (res.status === 403) throw new FrappeAccessError(doctype);
     if (!res.ok) throw new Error(`Frappe ${doctype} → HTTP ${res.status}`);
     return ((await res.json()) as { data: T[] }).data;
   }
@@ -185,7 +193,7 @@ export class FrappeSyncService implements OnApplicationBootstrap {
       });
       return days.length;
     } catch (e) {
-      return /HTTP 403/.test((e as Error).message) ? 'no access' : `failed: ${(e as Error).message}`;
+      return e instanceof FrappeAccessError ? 'no access' : `failed: ${(e as Error).message}`;
     }
   }
 }

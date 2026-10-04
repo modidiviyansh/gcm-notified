@@ -1,10 +1,10 @@
 import { useState } from 'react';
 import { api } from '../api';
-import { maskPhone, Phone } from './phone';
+import { maskPhone, Phone, WaMark } from './phone';
 import { describeRule, MessageType, NumberRule, RuleEditor, useLabels, useMessageTypes } from './rules';
 import { Badge, Field, Modal, useLoad, useToast } from './ui';
 
-export interface PersonPhone { phone: string; label: string; is_primary: boolean; opted_out?: boolean }
+export interface PersonPhone { phone: string; label: string; is_primary: boolean; opted_out?: boolean; wa?: boolean | null }
 
 /** A person's numbers, one per line: label, number (hidden), ★ primary, opted-out badge. */
 export function PhoneList({ phones }: { phones: PersonPhone[] }) {
@@ -16,6 +16,7 @@ export function PhoneList({ phones }: { phones: PersonPhone[] }) {
           <span className={`w-16 shrink-0 truncate rounded px-1.5 py-px text-center text-[11px] ${p.is_primary && phones.length > 1 ? 'bg-brand-50 text-brand-800' : 'bg-slate-100 text-slate-600'}`}
             title={p.is_primary ? `${p.label} — primary number` : p.label}>{p.label}</span>
           <Phone value={p.phone} />
+          <WaMark wa={p.wa} />
           {p.opted_out && <Badge tone="amber">opted out</Badge>}
         </div>
       ))}

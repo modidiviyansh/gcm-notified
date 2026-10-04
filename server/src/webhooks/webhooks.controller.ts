@@ -32,6 +32,7 @@ export class WebhooksController {
       if (ev.event === 'session.status') await this.numbers.onStatus(ev.session, ev.payload?.status, ev.me);
       else if (ev.event === 'message.ack') await this.onAck(ev.payload);
       else if (ev.event === 'message') await this.onMessage(ev.session, ev.payload);
+      else if (ev.event === 'call.received') await this.onCall(ev.session, ev.payload);
     } catch (e) {
       this.log.error(`${ev.event}: ${(e as Error).message}`);
     }
@@ -57,6 +58,41 @@ export class WebhooksController {
       await this.db.query('update messages set status=$2, ack_at=now() where id=$1', [m.id, status]);
       if (m.campaign_id) this.sender.dirtyCampaigns.add(m.campaign_id);
     }
+  }
+
+  /**
+   * Incoming WhatsApp call. WAHA is a linked device, so the call always rings on the phone itself.
+   * Per number: 'ignore' leaves it ringing; 'reject' declines it and (optionally) replies with a message —
+   * at most once per caller every 6 hours, so repeated calls don't get repeated replies.
+   */
+  private async onCall(session: string, p: any) {
+    const n = await this.db.one<{ id: number; label: string; call_policy: string; call_reply: string | null }>(
+      'select id, label, call_policy, call_reply from wa_numbers where session=$1', [session]);
+    if (!n || p?.isGroup) return;
+    const from = String(p?.from ?? '');
+    let phone = phoneFromChatId(from);
+    if (!phone && from.endsWith('@lid')) phone = phoneFromChatId((await this.waha.lidToPhone(session, from).catch(() => null))?.pn ?? null);
+    const video = !!p?.isVideo;
+    let action = 'ignored';
+    if (n.call_policy === 'reject' && from && p?.id) {
+      try {
+        await this.waha.rejectCall(session, from, String(p.id));
+        action = 'rejected';
+        const reply = n.call_reply?.trim();
+        const recent = phone ? await this.db.one(
+          `select 1 from calls where number_id=$1 and phone=$2 and action='rejected+replied' and created_at > now() - interval '6 hours'`, [n.id, phone]) : null;
+        if (reply && !recent) {
+          await this.waha.sendText(session, phone ? `${phone}@c.us` : from, reply);
+          action = 'rejected+replied';
+        }
+      } catch (e) {
+        action = 'failed';
+        this.log.warn(`Call reject on ${session} failed: ${(e as Error).message}`);
+      }
+    }
+    await this.db.query('insert into calls(number_id, phone, video, action) values ($1,$2,$3,$4)', [n.id, phone, video, action]);
+    const what = { ignored: 'left ringing', rejected: 'declined', 'rejected+replied': 'declined, reply sent', failed: 'could not be declined' }[action];
+    await this.db.event('call', `${video ? 'Video call' : 'Call'} from ${maskPhone(phone) || 'hidden number'} on "${n.label}" — ${what}`, action === 'failed' ? 'warn' : 'info');
   }
 
   /** Incoming message: handle STOP / UNSUBSCRIBE opt-outs. Nothing else is stored. */

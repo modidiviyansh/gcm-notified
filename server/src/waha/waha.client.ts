@@ -20,6 +20,15 @@ export interface WaTarget {
   community?: string | null;          // name of the community a group belongs to
 }
 
+/** Events GCM Notified listens to. Adding one here makes existing sessions get it on next boot (see NumbersService). */
+export const WEBHOOK_EVENTS = ['session.status', 'message', 'message.ack', 'call.received'];
+const webhook = () => ({
+  url: `${config.publicUrl}/api/webhooks/waha`,
+  events: WEBHOOK_EVENTS,
+  hmac: { key: config.webhookSecret },
+  retries: { policy: 'exponential', delaySeconds: 2, attempts: 8 },
+});
+
 export interface WahaFile { mimetype: string; filename: string; data: string }
 
 @Injectable()
@@ -56,29 +65,13 @@ export class WahaClient {
     return this.call<WahaSession>('POST', '/api/sessions', {
       name,
       start: true,
-      config: {
-        metadata,
-        webhooks: [{
-          url: `${config.publicUrl}/api/webhooks/waha`,
-          events: ['session.status', 'message', 'message.ack'],
-          hmac: { key: config.webhookSecret },
-          retries: { policy: 'exponential', delaySeconds: 2, attempts: 8 },
-        }],
-      },
+      config: { metadata, webhooks: [webhook()] },
     });
   }
   /** Re-applies webhook config (e.g. after PUBLIC_URL or secret changes). */
   updateSession(name: string, metadata: Record<string, string>) {
     return this.call('PUT', `/api/sessions/${encodeURIComponent(name)}`, {
-      config: {
-        metadata,
-        webhooks: [{
-          url: `${config.publicUrl}/api/webhooks/waha`,
-          events: ['session.status', 'message', 'message.ack'],
-          hmac: { key: config.webhookSecret },
-          retries: { policy: 'exponential', delaySeconds: 2, attempts: 8 },
-        }],
-      },
+      config: { metadata, webhooks: [webhook()] },
     });
   }
   getSession(name: string) { return this.call<WahaSession>('GET', `/api/sessions/${encodeURIComponent(name)}`); }
@@ -91,6 +84,14 @@ export class WahaClient {
   qrImage(name: string) { return this.call<Buffer>('GET', `/api/${encodeURIComponent(name)}/auth/qr?format=image`, undefined, 30_000, true); }
   requestCode(name: string, phoneNumber: string) {
     return this.call<{ code: string }>('POST', `/api/${encodeURIComponent(name)}/auth/request-code`, { phoneNumber });
+  }
+
+  /** Session config as WAHA stores it (to see which webhook events it already sends). */
+  sessionConfig(name: string) { return this.call<{ config?: { metadata?: Record<string, string>; webhooks?: { url?: string; events?: string[] }[] } }>('GET', `/api/sessions/${encodeURIComponent(name)}`); }
+
+  // ---- calls ----
+  rejectCall(session: string, from: string, id: string) {
+    return this.call('POST', `/api/${encodeURIComponent(session)}/calls/reject`, { from, id }, 15_000);
   }
 
   // ---- contacts ----

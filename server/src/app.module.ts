@@ -18,16 +18,20 @@ import { CampaignsController, TemplatesController } from './campaigns/campaigns.
 import { SenderService } from './sender/sender.service';
 import { SchedulerService } from './campaigns/scheduler.service';
 import { WebhooksController } from './webhooks/webhooks.controller';
+import { ApiKeysController, ApiService, PublicApiController } from './api/public-api';
+import { WaCheckService } from './contacts/wa-check.service';
+import { OneClickController, OneClickService } from './oneclick/oneclick.service';
 
 @Module({
   imports: [ScheduleModule.forRoot()],
   controllers: [
     AuthController, SettingsController, NumbersController, ContactsController, MediaController,
-    CampaignsController, TemplatesController, WebhooksController,
+    CampaignsController, TemplatesController, WebhooksController, PublicApiController, ApiKeysController, OneClickController,
   ],
   providers: [
     { provide: APP_GUARD, useClass: AuthGuard },
     Db, WahaClient, SettingsService, AlertsService, NumbersService, FrappeSyncService, PeopleService, CampaignsService, SchedulerService, SenderService,
+    ApiService, WaCheckService, OneClickService,
   ],
 })
 export class AppModule {}

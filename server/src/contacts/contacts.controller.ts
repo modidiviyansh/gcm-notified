@@ -14,7 +14,7 @@ export function parseCsv(buf: Buffer): Record<string, string>[] {
 
 // A person's numbers as JSON: [{phone, label, is_primary, opted_out}], primary first
 const PHONES_JSON = `coalesce((select json_agg(json_build_object('phone', pp.phone, 'label', pp.label, 'is_primary', pp.is_primary,
-  'opted_out', pp.phone in (select phone from opt_outs)) order by pp.is_primary desc, pp.id) from person_phones pp where pp.person_id = p.id), '[]')`;
+  'opted_out', pp.phone in (select phone from opt_outs), 'wa', (select on_whatsapp from phone_checks c where c.phone = pp.phone)) order by pp.is_primary desc, pp.id) from person_phones pp where pp.person_id = p.id), '[]')`;
 
 @Controller()
 export class ContactsController {
@@ -114,7 +114,8 @@ export class ContactsController {
     const digits = `%${q.replace(/\D/g, '')}%`;
     const students = await this.db.query(
       `select s.id, s.admission_no, s.student_name, s.program, s.section, s.father_name, s.mother_name, s.father_phone, s.mother_phone,
-              (s.father_phone in (select phone from opt_outs)) as father_opted_out, (s.mother_phone in (select phone from opt_outs)) as mother_opted_out
+              (s.father_phone in (select phone from opt_outs)) as father_opted_out, (s.mother_phone in (select phone from opt_outs)) as mother_opted_out,
+              (select on_whatsapp from phone_checks c where c.phone = s.father_phone) as father_wa, (select on_whatsapp from phone_checks c where c.phone = s.mother_phone) as mother_wa
        from students s join contact_groups g on g.id = s.group_id
        where s.active and (g.id = $1 or g.parent_id = $1)
          and ($2 = '' or s.student_name ilike $3 or s.admission_no ilike $3 or ($4 <> '%%' and (s.father_phone like $4 or s.mother_phone like $4)))

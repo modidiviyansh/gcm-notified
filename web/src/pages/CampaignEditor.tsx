@@ -261,7 +261,7 @@ function normaliseIds(ids: number[], tree: GroupNode[]): number[] {
   return out;
 }
 
-function ListPicker({ tree, ids, onChange }: { tree: GroupNode[]; ids: number[]; onChange: (ids: number[]) => void }) {
+export function ListPicker({ tree, ids, onChange }: { tree: GroupNode[]; ids: number[]; onChange: (ids: number[]) => void }) {
   const parentOf = new Map<number, GroupNode>();
   for (const r of tree) for (const c of r.children) parentOf.set(c.id, r);
   const byId = new Map<number, GroupNode>();

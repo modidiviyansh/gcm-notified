@@ -5,10 +5,11 @@ import { Db } from '../db/db.service';
 import { Public } from '../auth/auth';
 import { config, frappeConfigured, smtpConfigured } from '../config';
 import { WahaClient } from '../waha/waha.client';
+import { WaCheckService } from '../contacts/wa-check.service';
 
 @Controller()
 export class SettingsController {
-  constructor(private readonly settings: SettingsService, private readonly alerts: AlertsService, private readonly db: Db, private readonly waha: WahaClient) {}
+  constructor(private readonly settings: SettingsService, private readonly alerts: AlertsService, private readonly db: Db, private readonly waha: WahaClient, private readonly waCheck: WaCheckService) {}
 
   @Get('settings') get() { return this.settings.get(); }
   @Put('settings') update(@Body() b: any) { return this.settings.update(b); }
@@ -29,6 +30,18 @@ export class SettingsController {
       this.db.one(`select count(*)::int n from opt_outs`),
     ]);
     return { numbers, today, running, recent, events, optOuts: optOuts?.n ?? 0 };
+  }
+
+  @Get('wa-check') waCheckStatus() { return this.waCheck.status(); }
+
+  @Get('calls')
+  async calls() {
+    const [numbers, recent, today] = await Promise.all([
+      this.db.query(`select id, label, phone, status, call_policy, call_reply, auto_use from wa_numbers order by id`),
+      this.db.query(`select c.id, c.phone, c.video, c.action, c.created_at, n.label from calls c left join wa_numbers n on n.id = c.number_id order by c.id desc limit 50`),
+      this.db.one(`select count(*)::int n from calls where created_at > now() - interval '7 days'`),
+    ]);
+    return { numbers, recent, last7days: (today as any)?.n ?? 0 };
   }
 
   @Get('events') events() { return this.db.query('select * from events order by id desc limit 500'); }

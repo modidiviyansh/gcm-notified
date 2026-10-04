@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable, Logger, NotFoundException, OnApplicationBootstrap } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import { Db } from '../db/db.service';
-import { WahaClient, WahaError, WahaSession, WaTarget } from '../waha/waha.client';
+import { WahaClient, WahaError, WahaSession, WaTarget, WEBHOOK_EVENTS } from '../waha/waha.client';
 import { AlertsService } from '../alerts/alerts.service';
 import { SettingsService } from '../settings/settings.service';
 import { effectiveCap, levelFor, nextCap, warmupScore, WarmupInput } from './warmup';
@@ -15,6 +15,7 @@ export interface NumberRow extends WarmupInput {
   daily_cap: number; max_cap: number; cap_override: number | null; ramp_enabled: boolean;
   sent_today: number; failed_today: number; counter_date: string | null; disconnects_today: number;
   warmup_source: 'manual' | 'auto' | 'pending'; detected: Detection | null; detected_at: Date | null; wa_limits: WaLimits | null;
+  auto_use: boolean; call_policy: 'ignore' | 'reject'; call_reply: string | null;
 }
 
 const WARMUP_FIELDS = ['age_months', 'avg_chats_day', 'is_business', 'saved_by_contacts', 'past_ban'] as const;
@@ -32,6 +33,19 @@ export class NumbersService implements OnApplicationBootstrap {
   async onApplicationBootstrap() {
     await this.rollover().catch((e) => this.log.error(e));
     this.syncStatuses().catch((e) => this.log.warn(`Initial status sync failed: ${e.message}`));
+    setTimeout(() => this.ensureWebhooks().catch((e) => this.log.warn(`Webhook check failed: ${e.message}`)), 20_000);
+  }
+
+  /** Sessions created before an event was added (e.g. incoming calls) get the current webhook config once. */
+  private async ensureWebhooks() {
+    for (const n of await this.db.query<NumberRow>('select * from wa_numbers order by id')) {
+      const cur = await this.waha.sessionConfig(n.session).catch(() => null);
+      if (!cur) continue;
+      const hook = cur.config?.webhooks?.find((w) => w.url?.endsWith('/api/webhooks/waha'));
+      if (hook && WEBHOOK_EVENTS.every((e) => hook.events?.includes(e))) continue;
+      await this.waha.updateSession(n.session, { app: 'gcm-notified', numberId: String(n.id), ...(cur.config?.metadata ?? {}) });
+      await this.db.event('number', `"${n.label}": webhook updated (now also receives incoming calls)`);
+    }
   }
 
   decorate(n: NumberRow) {
@@ -84,8 +98,17 @@ export class NumbersService implements OnApplicationBootstrap {
     return this.decorate((await this.get(row!.id)));
   }
 
-  async update(id: number, body: Partial<WarmupInput> & { label?: string; max_cap?: number; cap_override?: number | null; ramp_enabled?: boolean }) {
+  async update(id: number, body: Partial<WarmupInput> & { label?: string; max_cap?: number; cap_override?: number | null; ramp_enabled?: boolean;
+    auto_use?: boolean; call_policy?: string; call_reply?: string | null }) {
     const n = await this.get(id);
+    // How the app may use this number on its own, and what happens to incoming calls
+    if (body.auto_use !== undefined || body.call_policy !== undefined || body.call_reply !== undefined) {
+      const cur = n as NumberRow;
+      await this.db.query('update wa_numbers set auto_use=$2, call_policy=$3, call_reply=$4 where id=$1', [id,
+        body.auto_use ?? cur.auto_use,
+        body.call_policy === undefined ? cur.call_policy : body.call_policy === 'reject' ? 'reject' : 'ignore',
+        body.call_reply === undefined ? cur.call_reply : String(body.call_reply ?? '').trim().slice(0, 1000) || null]);
+    }
     const w = { ...pick(n), ...pickWarmup(body, true) };
     const oldLevel = levelFor(warmupScore(n)).level;
     const lvl = levelFor(warmupScore(w));

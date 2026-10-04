@@ -10,10 +10,12 @@ import CampaignEditor from './pages/CampaignEditor';
 import CampaignDetail from './pages/CampaignDetail';
 import Settings from './pages/Settings';
 import Activity from './pages/Activity';
+import OneClick from './pages/OneClick';
 import { PrivacyProvider } from './components/phone';
 
 const NAV = [
   { to: '/', label: 'Dashboard', icon: '◧' },
+  { to: '/notify', label: '1-Click Notify', icon: '⚡' },
   { to: '/campaigns', label: 'Campaigns', icon: '✉' },
   { to: '/contacts', label: 'Contacts', icon: '☰' },
   { to: '/numbers', label: 'Numbers', icon: '☏' },
@@ -74,6 +76,7 @@ export default function App() {
             <PrivacyProvider>
             <Routes>
               <Route path="/" element={<Dashboard />} />
+              <Route path="/notify" element={<OneClick />} />
               <Route path="/campaigns" element={<Campaigns />} />
               <Route path="/campaigns/:id/edit" element={<CampaignEditor />} />
               <Route path="/campaigns/:id" element={<CampaignDetail />} />

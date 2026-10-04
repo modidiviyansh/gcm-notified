@@ -2,6 +2,7 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { Db } from '../db/db.service';
 import type { RecipientMode } from '../campaigns/render';
 import { cleanRule, NumberRule, PRIMARY_RULE } from '../contacts/rules';
+import { checkTemplate } from '../campaigns/render';
 
 export interface SpeedPreset { delayMinMs: number; delayMaxMs: number; burstMin: number; burstMax: number; burstPauseMinMs: number; burstPauseMaxMs: number }
 
@@ -29,7 +30,31 @@ export interface AppSettings {
   messageTypes: MessageType[];
   frequencyCap: { perDay: number };   // messages per person per day across all campaigns (0 = off; emergencies exempt)
   holidays: string[];                  // extra holidays (YYYY-MM-DD) on top of Frappe's Holiday List
+  waCheck: { enabled: boolean; everyDays: number; perHour: number };   // background "is this number on WhatsApp?" check
+  api: { perMinute: number };          // public send API: messages per key per minute
+  oneClick: { marks: { template: string }; fees: { template: string } };
+  seededTypes: string[];               // default message types already added once (a removed one is not re-added)
 }
+
+export const MARKS_TEMPLATE = `Dear Parent,
+
+*{{student_name}}* ({{class}}) — *{{exam}}* result:
+
+{{marks}}
+
+*Total: {{total}} / {{max}} ({{percent}}%)*
+
+— GCM Convent School`;
+
+export const FEES_TEMPLATE = `Dear Parent,
+
+This is a gentle reminder that fees of *{{amount}}* are pending for *{{student_name}}* ({{class}}).
+
+{{fee_list}}
+
+Please pay at the school office at the earliest. Kindly ignore this message if already paid.
+
+— GCM Convent School`;
 
 export const DEFAULT_SETTINGS: AppSettings = {
   quietHours: { enabled: true, start: '22:00', end: '06:00' },
@@ -48,9 +73,14 @@ export const DEFAULT_SETTINGS: AppSettings = {
   privacy: { maskPhones: true, rehideSeconds: 30 },
   frequencyCap: { perDay: 3 },
   holidays: [],
+  waCheck: { enabled: true, everyDays: 7, perHour: 200 },
+  api: { perMinute: 60 },
+  oneClick: { marks: { template: MARKS_TEMPLATE }, fees: { template: FEES_TEMPLATE } },
+  seededTypes: ['notice', 'invitation', 'fees', 'greeting', 'reminder', 'sos', 'academic'],
   messageTypes: [
     { key: 'notice', name: 'Notice', icon: '📢', rule: PRIMARY_RULE, school: 'primary', speed: 'normal', quietHours: true, overrideOptOut: false },
     { key: 'invitation', name: 'Invitation', icon: '💌', rule: PRIMARY_RULE, school: 'primary', speed: 'normal', quietHours: true, overrideOptOut: false },
+    { key: 'academic', name: 'Academic', icon: '📝', rule: PRIMARY_RULE, school: 'primary', speed: 'normal', quietHours: true, overrideOptOut: false },
     { key: 'fees', name: 'Fees', icon: '💰', rule: PRIMARY_RULE, school: 'primary', speed: 'normal', quietHours: true, overrideOptOut: false },
     { key: 'greeting', name: 'Greeting', icon: '🎉', rule: PRIMARY_RULE, school: 'primary', speed: 'safe', quietHours: true, overrideOptOut: false },
     { key: 'reminder', name: 'Reminder', icon: '⏰', rule: PRIMARY_RULE, school: 'primary', speed: 'normal', quietHours: true, overrideOptOut: false },
@@ -90,7 +120,14 @@ export class SettingsService {
   async get(): Promise<AppSettings> {
     if (this.cache) return this.cache;
     const row = await this.db.one<{ value: Partial<AppSettings> }>(`select value from settings where key = 'app'`);
-    this.cache = deepMerge(DEFAULT_SETTINGS, row?.value ?? {}) as AppSettings;
+    const merged = deepMerge(DEFAULT_SETTINGS, row?.value ?? {}) as AppSettings;
+    // Saved settings keep their own list of types: add new default types once (e.g. Academic), never re-add a removed one
+    const seeded = new Set(row?.value?.seededTypes ?? ['notice', 'invitation', 'fees', 'greeting', 'reminder', 'sos']);
+    for (const t of DEFAULT_SETTINGS.messageTypes) {
+      if (!seeded.has(t.key) && !merged.messageTypes.some((x) => x.key === t.key)) merged.messageTypes.push(t);
+    }
+    merged.seededTypes = DEFAULT_SETTINGS.seededTypes;
+    this.cache = merged;
     return this.cache;
   }
 
@@ -99,11 +136,27 @@ export class SettingsService {
     return s.messageTypes.find((t) => t.key === key) ?? null;
   }
 
+  /** A type the app itself relies on (1-Click uses academic / fees): the saved one, else its default. */
+  async builtInType(key: 'academic' | 'fees'): Promise<MessageType> {
+    return (await this.messageType(key)) ?? DEFAULT_SETTINGS.messageTypes.find((t) => t.key === key)!;
+  }
+
   async update(patch: Partial<AppSettings>): Promise<AppSettings> {
     const next = deepMerge(await this.get(), patch) as AppSettings;
     next.optOutKeywords = next.optOutKeywords.map((k) => k.trim().toLowerCase()).filter(Boolean);
     next.messageTypes = cleanMessageTypes(next.messageTypes);
     next.frequencyCap = { perDay: Math.max(0, Math.min(50, Math.round(Number(next.frequencyCap?.perDay) || 0))) };
+    next.waCheck = {
+      enabled: next.waCheck?.enabled !== false,
+      everyDays: Math.max(1, Math.min(90, Math.round(Number(next.waCheck?.everyDays) || 7))),
+      perHour: Math.max(10, Math.min(1000, Math.round(Number(next.waCheck?.perHour) || 200))),
+    };
+    next.api = { perMinute: Math.max(1, Math.min(600, Math.round(Number(next.api?.perMinute) || 60))) };
+    for (const k of ['marks', 'fees'] as const) {
+      const t = String(next.oneClick?.[k]?.template ?? '').trim();
+      try { checkTemplate(t); } catch (e) { throw new BadRequestException(`${k === 'marks' ? 'Marks' : 'Fees'} message: ${(e as Error).message}`); }
+      next.oneClick[k] = { template: t || (k === 'marks' ? MARKS_TEMPLATE : FEES_TEMPLATE) };
+    }
     next.holidays = [...new Set((next.holidays ?? []).map((d) => String(d).trim()).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)))].sort();
     await this.db.query(
       `insert into settings(key, value, updated_at) values ('app', $1, now())

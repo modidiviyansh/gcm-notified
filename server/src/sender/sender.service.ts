@@ -25,7 +25,6 @@ interface Speed {
 }
 interface LoopState { running: boolean; burstCount: number; burstTarget: number; timer?: NodeJS.Timeout }
 
-const PHONE_CHECK_TTL_DAYS = 30;
 const MAX_ATTEMPTS = 3;
 
 @Injectable()
@@ -205,7 +204,7 @@ export class SenderService implements OnApplicationBootstrap, OnModuleDestroy {
 
   private async onWhatsApp(session: string, phone: string): Promise<boolean | null> {
     const c = await this.db.one<{ on_whatsapp: boolean }>(
-      `select on_whatsapp from phone_checks where phone=$1 and checked_at > now() - ($2 || ' days')::interval`, [phone, PHONE_CHECK_TTL_DAYS]);
+      `select on_whatsapp from phone_checks where phone=$1 and checked_at > now() - ($2 || ' days')::interval`, [phone, (await this.settings.get()).waCheck.everyDays]);
     if (c) return c.on_whatsapp;
     if (!config.sendingEnabled) return true;
     try {

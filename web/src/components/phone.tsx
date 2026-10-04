@@ -122,3 +122,10 @@ export function RevealAll() {
     ? <button type="button" className={cls} onClick={() => p.hide(phones)}><EyeIcon off /> Hide numbers</button>
     : <button type="button" className={cls} onClick={() => p.show(phones)}><EyeIcon /> Show all numbers</button>;
 }
+
+/** Result of the weekly WhatsApp check: green dot = on WhatsApp, red = not on WhatsApp, nothing = not checked yet. */
+export function WaMark({ wa }: { wa?: boolean | null }) {
+  if (wa === true) return <span className="inline-block h-2 w-2 shrink-0 rounded-full bg-emerald-500" title="On WhatsApp" aria-label="On WhatsApp" />;
+  if (wa === false) return <span className="shrink-0 rounded bg-red-50 px-1.5 py-px text-[11px] font-medium text-red-700" title="This number is not on WhatsApp — messages to it are skipped">No WhatsApp</span>;
+  return null;
+}
