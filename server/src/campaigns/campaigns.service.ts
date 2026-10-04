@@ -187,9 +187,24 @@ export class CampaignsService {
     return { recipients: [...st.recipients, ...ct], noNumber: st.noNumber.length, studentsCount: students.length, contactsCount: contacts.length };
   }
 
+  /** WhatsApp-group targets this campaign's numbers are not allowed to post into (admins-only groups / communities). */
+  private async blockedTargets(c: Campaign): Promise<Set<string>> {
+    const blocked = new Set<string>();
+    if (c.kind !== 'wa_groups') return blocked;
+    const byNumber = new Map<number, string[]>();
+    for (const t of c.audience.waGroups ?? []) byNumber.set(t.numberId, [...(byNumber.get(t.numberId) ?? []), t.chatId]);
+    for (const [numberId, chatIds] of byNumber) {
+      const allowed = await this.numbers.checkPostRights(numberId, chatIds).catch(() => new Map<string, boolean>());
+      for (const chatId of chatIds) if (allowed.get(chatId) === false) blocked.add(`${numberId}:${chatId}`);
+    }
+    return blocked;
+  }
+
   async preview(id: number, limit = 5) {
     const c = await this.get(id);
     const r = await this.resolve(c);
+    const blocked = await this.blockedTargets(c);
+    const notAdmin = (c.audience.waGroups ?? []).filter((t) => blocked.has(`${t.numberId}:${t.chatId}`)).map((t) => t.subject ?? t.chatId);
     const opted = new Set((await this.db.query<{ phone: string }>('select phone from opt_outs')).map((x) => x.phone));
     const optedOut = r.recipients.filter((x) => x.phone && opted.has(x.phone)).length;
     const samples = r.recipients.slice(0, limit).map((x) => ({
@@ -199,7 +214,7 @@ export class CampaignsService {
       c.kind === 'wa_groups' ? (c.audience.waGroups ?? []).some((g) => g.numberId === n.id) : c.number_ids.includes(n.id));
     const est = estimate(r.recipients.length - optedOut, numbers.map((n) => ({ remaining: n.remaining_today })), c, c.body.length || 160);
     return {
-      recipients: r.recipients.length, optedOut, noNumber: r.noNumber, students: r.studentsCount, contacts: r.contactsCount,
+      recipients: r.recipients.length, optedOut, notAdmin, noNumber: r.noNumber, students: r.studentsCount, contacts: r.contactsCount,
       csv: c.audience.csv ?? null, samples, estimate: est,
       numbers: numbers.map((n) => ({ id: n.id, label: n.label, status: n.status, paused: n.paused, remaining_today: n.remaining_today })),
     };
@@ -218,6 +233,7 @@ export class CampaignsService {
     const r = await this.resolve(c);
     if (!r.recipients.length) throw new BadRequestException('This campaign has no recipients');
     const opted = new Set((await this.db.query<{ phone: string }>('select phone from opt_outs')).map((x) => x.phone));
+    const blocked = await this.blockedTargets(c);
 
     await this.db.tx(async (tx) => {
       let i = 0;
@@ -225,6 +241,12 @@ export class CampaignsService {
         const fixed = r.fixed?.[i]?.numberId ?? null;
         i++;
         const isOpted = !!rec.phone && opted.has(rec.phone);
+        if (fixed !== null && blocked.has(`${fixed}:${rec.chatId}`)) {
+          await tx.query(
+            `insert into messages(campaign_id, number_id, fixed_number, chat_id, recipient, body, media_id, status, error) values ($1,$2,true,$3,$4,'',$5,'skipped',$6)`,
+            [c.id, fixed, rec.chatId, rec.display, c.media_id, 'Not an admin — only admins can post in this group or community']);
+          continue;
+        }
         const body = c.body ? safeRender(c.body, rec.vars) : '';
         // Space out several per-child messages to the same parent by 3 minutes each
         const notBefore = rec.childIndex > 0 ? new Date(Date.now() + rec.childIndex * 180_000) : null;

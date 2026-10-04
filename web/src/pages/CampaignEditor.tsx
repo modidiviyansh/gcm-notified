@@ -39,7 +39,7 @@ export default function CampaignEditor() {
 
   const launch = async () => {
     if (!preview) return;
-    if (!confirm(`Start sending to ${preview.recipients - preview.optedOut} recipients now?`)) return;
+    if (!confirm(`Start sending to ${sendableOf(preview)} recipients now?`)) return;
     setBusy(true);
     try { await api.post(`/campaigns/${id}/launch`); toast('Campaign started'); nav(`/campaigns/${id}`); } catch (e) { toast((e as Error).message, 'error'); } finally { setBusy(false); }
   };
@@ -94,7 +94,7 @@ export default function CampaignEditor() {
           <div className="flex flex-wrap gap-2">
             <button className="btn-secondary" onClick={loadPreview} disabled={busy}>{busy ? 'Checking…' : preview ? 'Refresh preview' : 'Preview messages'}</button>
             {preview && <TestSend id={c.id} numbers={(numbers ?? []).filter((n) => n.status === 'WORKING')} />}
-            <button className="btn-primary" onClick={launch} disabled={busy || !preview || !(preview.recipients - preview.optedOut)}>Launch campaign</button>
+            <button className="btn-primary" onClick={launch} disabled={busy || !preview || !sendableOf(preview)}>Launch campaign</button>
           </div>
           {preview && <Preview p={preview} />}
         </Step>
@@ -102,6 +102,8 @@ export default function CampaignEditor() {
     </>
   );
 }
+
+const sendableOf = (p: any) => p.recipients - p.optedOut - (p.notAdmin?.length ?? 0);
 
 function Step({ n, title, children }: { n: number; title: string; children: ReactNode }) {
   return (
@@ -238,7 +240,7 @@ function ListPicker({ tree, ids, onChange }: { tree: GroupNode[]; ids: number[];
   );
 }
 
-interface WaTargetRow { chat_id: string; subject: string; participants: number | null; kind: 'group' | 'channel'; announce: boolean; role: string | null; source: string; refreshed_at: string }
+interface WaTargetRow { chat_id: string; subject: string; participants: number | null; kind: 'group' | 'channel' | 'community'; announce: boolean; role: string | null; source: string; community: string | null; my_role: string | null; refreshed_at: string }
 
 function WaGroupsPicker({ c, numbers, onChange }: { c: any; numbers: any[]; onChange: (g: any[]) => void }) {
   const toast = useToast();
@@ -256,18 +258,23 @@ function WaGroupsPicker({ c, numbers, onChange }: { c: any; numbers: any[]; onCh
     try {
       const r = await api.post<{ items: WaTargetRow[]; warning: string | null }>(`/numbers/${nid}/groups/refresh`);
       setData(r.items); setWarning(r.warning);
-      toast(`${r.items.filter((x) => x.kind === 'group').length} groups and ${r.items.filter((x) => x.kind === 'channel').length} channels loaded`);
+      const k = (kind: string) => r.items.filter((x) => x.kind === kind).length;
+      toast(`${k('group')} groups, ${k('community')} communities and ${k('channel')} channels loaded`);
     } catch (e) { toast((e as Error).message, 'error'); } finally { setBusy(false); }
   };
 
   if (!working.length) return <Empty>No connected numbers. Connect a number on the <Link to="/numbers" className="underline">Numbers</Link> page first.</Empty>;
   const list = rows ?? [];
-  const groupsN = list.filter((g) => g.kind === 'group').length, channelsN = list.length - groupsN;
+  const countOf = (k: string) => list.filter((g) => g.kind === k).length;
+  const notAdmin = (g: WaTargetRow) => g.announce && g.my_role !== null && !['admin', 'superadmin'].includes(g.my_role);
   const options: MsOption[] = list.map((g) => ({
-    value: g.chat_id, label: g.subject,
-    group: g.kind === 'channel' ? 'Channels you manage' : 'Groups',
-    hint: g.participants ? `${g.participants} ${g.kind === 'channel' ? 'followers' : 'members'}` : undefined,
-    badge: g.kind === 'channel' ? <Badge tone="violet">channel</Badge> : g.announce ? <Badge tone="amber">admins only</Badge> : undefined,
+    value: g.chat_id, label: g.subject, search: `${g.subject} ${g.community ?? ''}`,
+    group: g.kind === 'channel' ? 'Channels you manage' : g.kind === 'community' ? 'Communities — announcement to all members' : 'Groups',
+    hint: [g.community && g.kind === 'group' ? `in ${g.community}` : null, g.participants ? `${g.participants} ${g.kind === 'channel' ? 'followers' : 'members'}` : null].filter(Boolean).join(' · ') || undefined,
+    badge: notAdmin(g) ? <Badge tone="red">not admin</Badge>
+      : g.kind === 'channel' ? <Badge tone="violet">channel</Badge>
+      : g.kind === 'community' ? <Badge tone="blue">community</Badge>
+      : g.announce ? <Badge tone="amber">admins only</Badge> : undefined,
   }));
   const subjectOf = (chatId: string) => list.find((g) => g.chat_id === chatId)?.subject ?? chatId;
   const others = selected.filter((g) => g.numberId !== nid);
@@ -280,8 +287,8 @@ function WaGroupsPicker({ c, numbers, onChange }: { c: any; numbers: any[]; onCh
             {working.map((n) => <option key={n.id} value={n.id}>{n.label}</option>)}
           </select>
         </Field>
-        <button className="btn-secondary" disabled={busy} onClick={refresh}>{busy ? 'Loading from WhatsApp… (up to 2 min)' : list.length ? '↻ Refresh from WhatsApp' : 'Load groups & channels'}</button>
-        {list.length > 0 && <span className="pb-2 text-xs text-slate-500">{groupsN} groups · {channelsN} channels · updated {fmtDate(list[0].refreshed_at)}</span>}
+        <button className="btn-secondary" disabled={busy} onClick={refresh}>{busy ? 'Loading from WhatsApp…' : list.length ? '↻ Refresh from WhatsApp' : 'Load groups & channels'}</button>
+        {list.length > 0 && <span className="pb-2 text-xs text-slate-500">{countOf('group')} groups · {countOf('community')} communities · {countOf('channel')} channels · updated {fmtDate(list[0].refreshed_at)}</span>}
       </div>
       {(warning || list.some((g) => g.source === 'chats')) && (
         <div className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800">{warning ?? 'Showing groups from recent chats only — the full list could not be loaded last time.'}</div>
@@ -297,15 +304,15 @@ function WaGroupsPicker({ c, numbers, onChange }: { c: any; numbers: any[]; onCh
             ? [...selected, ...shown.filter((o) => !mine.some((g) => g.chatId === o.value)).map((o) => ({ numberId: nid!, chatId: o.value, subject: o.label }))]
             : selected.filter((g) => !(g.numberId === nid && vals.has(g.chatId))));
         }}
-        chips={mine.map((g) => ({ value: g.chatId, label: g.chatId.endsWith('@newsletter') ? `📢 ${g.subject ?? subjectOf(g.chatId)}` : g.subject ?? subjectOf(g.chatId) }))}
+        chips={mine.map((g) => ({ value: g.chatId, label: `${g.chatId.endsWith('@newsletter') ? '📢 ' : list.find((x) => x.chat_id === g.chatId)?.kind === 'community' ? '🏘 ' : ''}${g.subject ?? subjectOf(g.chatId)}` }))}
         onRemoveChip={(v) => onChange(selected.filter((g) => !(g.numberId === nid && g.chatId === v)))}
-        placeholder={list.length ? 'Choose groups or channels…' : 'Click “Load groups & channels” first'}
+        placeholder={list.length ? 'Choose groups, communities or channels…' : 'Click “Load groups & channels” first'}
         emptyText="No groups loaded yet." />
       {others.length > 0 && (
         <p className="text-xs text-slate-500">Also selected from other numbers: {others.map((g) => `${g.subject} (via ${numbers.find((n) => n.id === g.numberId)?.label ?? '?'})`).join(', ')}</p>
       )}
       <p className="text-xs text-slate-500">
-        <b>{selected.length}</b> selected. Each group or channel is posted to from the number it was picked under. In <Badge tone="amber">admins only</Badge> groups the number must be an admin. Variable: <code>{'{{group_name}}'}</code>.
+        <b>{selected.length}</b> selected. Each group or channel is posted to from the number it was picked under. Posting to a <Badge tone="blue">community</Badge> reaches all its members; in communities and <Badge tone="amber">admins only</Badge> groups the number must be an admin — this is checked before launch. Variable: <code>{'{{group_name}}'}</code>.
       </p>
     </div>
   );
@@ -424,7 +431,7 @@ function Speed({ c, presets, onPatch, quiet }: { c: any; presets: any; onPatch: 
 
 function Preview({ p }: { p: any }) {
   const e = p.estimate;
-  const sendable = p.recipients - p.optedOut;
+  const sendable = sendableOf(p);
   const riskTone = e.risk === 'high' ? 'red' : e.risk === 'medium' ? 'amber' : 'green';
   return (
     <div className="mt-4 space-y-4">
@@ -440,6 +447,7 @@ function Preview({ p }: { p: any }) {
       </div>
       {e.overflow > 0 && <div className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800">Today's remaining capacity is {e.capToday}. The other <b>{e.overflow}</b> messages continue automatically tomorrow when daily caps reset — or add more numbers.</div>}
       {p.numbers.some((n: any) => n.status !== 'WORKING' || n.paused) && <div className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800">Some selected numbers are not connected or are paused — they won't send until they are back.</div>}
+      {p.notAdmin?.length > 0 && <div className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">Not an admin in <b>{p.notAdmin.length}</b> admins-only group{p.notAdmin.length > 1 ? 's' : ''}/communit{p.notAdmin.length > 1 ? 'ies' : 'y'} — {p.notAdmin.slice(0, 5).join(', ')}{p.notAdmin.length > 5 ? '…' : ''}. These are skipped.</div>}
       {p.csv?.unmatched > 0 && <div className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">{p.csv.unmatched} CSV rows did not match a student and will not be sent.</div>}
       <div>
         <span className="label">First {p.samples.length} messages</span>

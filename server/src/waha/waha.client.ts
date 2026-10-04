@@ -16,7 +16,8 @@ export interface WahaSession {
 /** Something a number can post into: a WhatsApp group or a channel it administers. */
 export interface WaTarget {
   chatId: string; subject: string; participants: number | null;
-  announce: boolean; kind: 'group' | 'channel'; role: string | null;
+  announce: boolean; kind: 'group' | 'channel' | 'community'; role: string | null;
+  community?: string | null;          // name of the community a group belongs to
 }
 
 export interface WahaFile { mimetype: string; filename: string; data: string }
@@ -109,8 +110,11 @@ export class WahaClient {
   async listGroups(session: string): Promise<WaTarget[]> {
     const raw = await this.call<any>('GET', `/api/${encodeURIComponent(session)}/groups?exclude=participants`, undefined, 180_000);
     const list: any[] = Array.isArray(raw) ? raw : Object.values(raw ?? {});
+    const idOf = (g: any) => String(g?.id?._serialized ?? g?.id ?? g?.JID ?? g?.jid ?? '');
+    // Community "parent" groups can't receive messages; posting to the community = its announcement group
+    const parents = new Map(list.filter((g) => g?.IsParent ?? g?.isParent).map((g) => [idOf(g), g?.Name ?? g?.subject ?? g?.name ?? null]));
     return list
-      .filter((g) => !(g?.IsParent ?? g?.isParent)) // community "parent" groups can't receive messages
+      .filter((g) => !(g?.IsParent ?? g?.isParent))
       .map((g) => {
         const id = g?.id?._serialized ?? g?.id ?? g?.JID ?? g?.jid;
         const parts = g?.participants ?? g?.Participants;
@@ -120,10 +124,21 @@ export class WahaClient {
           subject: g?.subject ?? g?.Name ?? g?.name ?? '(no name)',
           participants: typeof count === 'number' ? count : null,
           announce: !!(g?.IsAnnounce ?? g?.announce ?? g?.isAnnounce),
-          kind: 'group' as const, role: null,
+          kind: (g?.IsDefaultSubGroup ? 'community' : 'group') as WaTarget['kind'], role: null,
+          community: (g?.LinkedParentJID && parents.get(String(g.LinkedParentJID))) || null,
         };
       })
       .filter((g) => g.chatId.endsWith('@g.us'));
+  }
+
+  /** This number's role in one group: 'superadmin' | 'admin' | 'participant', or null if not a member. */
+  async myRole(session: string, groupId: string): Promise<string | null> {
+    const s = await this.getSession(session);
+    const me = s.me as any;
+    const mine = new Set([me?.id, me?.lid, me?.jid].filter(Boolean).map((x: string) => x.split('@')[0].split(':')[0]));
+    const parts = await this.call<any[]>('GET', `/api/${encodeURIComponent(session)}/groups/${encodeURIComponent(groupId)}/participants/v2`, undefined, 60_000);
+    const row = (parts ?? []).find((p) => ['id', 'pn', 'lid'].some((k) => p?.[k] && mine.has(String(p[k]).split('@')[0].split(':')[0])));
+    return row ? String(row.role ?? 'participant').toLowerCase() : null;
   }
 
   /** Cheap fallback: groups that appear in the recent chat list (local store, no WhatsApp round-trip). */

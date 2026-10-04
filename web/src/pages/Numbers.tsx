@@ -261,7 +261,7 @@ function GroupsModal({ n, onClose }: { n: Num; onClose: () => void }) {
   const { data, setData, loading } = useLoad(() => api.get<any[]>(`/numbers/${n.id}/groups`), [n.id]);
   const [busy, setBusy] = useState(false);
   const [warning, setWarning] = useState<string | null>(null);
-  const [tab, setTab] = useState<'group' | 'channel'>('group');
+  const [tab, setTab] = useState<'group' | 'community' | 'channel'>('group');
   const [q, setQ] = useState('');
   const refresh = async () => {
     setBusy(true); setWarning(null);
@@ -275,13 +275,13 @@ function GroupsModal({ n, onClose }: { n: Num; onClose: () => void }) {
     <Modal open title={`Groups & channels — ${n.label}`} onClose={onClose} wide>
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm text-slate-500">{all.length ? <>Last loaded {fmtDate(all[0].refreshed_at)}. Reload after joining or leaving groups.</> : 'Not loaded yet.'}</p>
-        <button className="btn-secondary" disabled={busy} onClick={refresh}>{busy ? 'Loading… (up to 2 min)' : '↻ Load from WhatsApp'}</button>
+        <button className="btn-secondary" disabled={busy} onClick={refresh}>{busy ? 'Loading…' : '↻ Load from WhatsApp'}</button>
       </div>
       {(warning || all.some((g) => g.source === 'chats')) && <div className="mb-3 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800">{warning ?? 'Showing groups from recent chats only — the full list could not be loaded last time.'}</div>}
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        {(['group', 'channel'] as const).map((k) => (
+        {(['group', 'community', 'channel'] as const).map((k) => (
           <button key={k} onClick={() => setTab(k)} className={`rounded-full px-3 py-1 text-sm ${tab === k ? 'bg-brand-700 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
-            {k === 'group' ? 'Groups' : 'Channels you manage'} ({count(k)})
+            {k === 'group' ? 'Groups' : k === 'community' ? 'Communities' : 'Channels you manage'} ({count(k)})
           </button>
         ))}
         <input className="input ml-auto w-56" placeholder="Search" value={q} onChange={(e) => setQ(e.target.value)} />
@@ -289,10 +289,10 @@ function GroupsModal({ n, onClose }: { n: Num; onClose: () => void }) {
       {loading ? <p className="text-sm text-slate-500">Loading…</p> : !rows.length ? <Empty>{all.length ? 'Nothing here.' : <>Click <b>Load from WhatsApp</b>.</>}</Empty> : (
         <div className="max-h-[50vh] overflow-y-auto">
           <table className="table">
-            <thead><tr><th>{tab === 'group' ? 'Group' : 'Channel'}</th><th>{tab === 'group' ? 'Members' : 'Followers'}</th><th /></tr></thead>
+            <thead><tr><th>{tab === 'group' ? 'Group' : tab === 'community' ? 'Community (announcements)' : 'Channel'}</th><th>{tab === 'channel' ? 'Followers' : 'Members'}</th><th /></tr></thead>
             <tbody>{rows.map((g) => (
               <tr key={g.chat_id}>
-                <td>{g.subject}</td><td>{g.participants ?? '—'}</td>
+                <td>{g.subject}{g.community && tab === 'group' && <div className="text-xs text-slate-400">in {g.community}</div>}</td><td>{g.participants ?? '—'}</td>
                 <td className="text-right">{g.announce && <Badge tone="amber">admins only</Badge>}{g.role && <Badge tone="violet">{g.role.toLowerCase()}</Badge>}</td>
               </tr>))}</tbody>
           </table>

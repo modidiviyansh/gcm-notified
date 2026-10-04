@@ -158,15 +158,21 @@ export class NumbersService implements OnApplicationBootstrap {
       }
       let channels: WaTarget[] = [];
       try { channels = await this.waha.listChannels(n.session); } catch (e) { this.log.warn(`Channels failed for "${n.label}": ${(e as Error).message}`); }
+      // Keep admin checks already done (they cost one WhatsApp request per group)
+      const roles = new Map((await this.db.query<{ chat_id: string; my_role: string | null; role_checked_at: Date | null }>(
+        'select chat_id, my_role, role_checked_at from wa_groups where number_id=$1 and role_checked_at is not null', [id])).map((r) => [r.chat_id, r]));
       await this.db.tx(async (c) => {
         await c.query('delete from wa_groups where number_id=$1', [id]);
         for (const g of [...channels, ...groups]) {
           await c.query(
-            `insert into wa_groups(number_id, chat_id, subject, participants, kind, announce, role, source) values ($1,$2,$3,$4,$5,$6,$7,$8) on conflict do nothing`,
-            [id, g.chatId, g.subject, g.participants, g.kind, g.announce, g.role, g.kind === 'channel' ? 'full' : source]);
+            `insert into wa_groups(number_id, chat_id, subject, participants, kind, announce, role, source, community, my_role, role_checked_at)
+             values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) on conflict do nothing`,
+            [id, g.chatId, g.subject, g.participants, g.kind, g.announce, g.role, g.kind === 'channel' ? 'full' : source, g.community ?? null,
+             roles.get(g.chatId)?.my_role ?? null, roles.get(g.chatId)?.role_checked_at ?? null]);
         }
       });
-      await this.db.event('number', `"${n.label}": ${groups.length} groups${source === 'chats' ? ' (from recent chats)' : ''} and ${channels.length} channels loaded`, warning ? 'warn' : 'info');
+      const communities = groups.filter((g) => g.kind === 'community').length;
+      await this.db.event('number', `"${n.label}": ${groups.length - communities} groups, ${communities} communities${source === 'chats' ? ' (from recent chats)' : ''} and ${channels.length} channels loaded`, warning ? 'warn' : 'info');
     } finally {
       this.refreshing = null;
     }
@@ -175,8 +181,35 @@ export class NumbersService implements OnApplicationBootstrap {
 
   groups(id: number) {
     return this.db.query(
-      `select chat_id, subject, participants, kind, announce, role, source, refreshed_at from wa_groups where number_id=$1
-       order by kind desc, lower(subject)`, [id]);
+      `select chat_id, subject, participants, kind, announce, role, source, community, my_role, refreshed_at from wa_groups where number_id=$1
+       order by case kind when 'channel' then 0 when 'community' then 1 else 2 end, lower(subject)`, [id]);
+  }
+
+  /**
+   * For admins-only groups and community announcements: is this number allowed to post?
+   * Checks only the given groups (one request each) and caches the answer for a day.
+   */
+  async checkPostRights(numberId: number, chatIds: string[]): Promise<Map<string, boolean>> {
+    const n = await this.get(numberId);
+    const rows = await this.db.query<{ chat_id: string; announce: boolean; my_role: string | null; role_checked_at: Date | null }>(
+      'select chat_id, announce, my_role, role_checked_at from wa_groups where number_id=$1 and chat_id = any($2)', [numberId, chatIds]);
+    const out = new Map<string, boolean>();
+    for (const r of rows) {
+      if (!r.announce || r.chat_id.endsWith('@newsletter')) { out.set(r.chat_id, true); continue; }
+      let role = r.my_role;
+      let known = !!r.role_checked_at;
+      const fresh = known && Date.now() - r.role_checked_at!.getTime() < 86_400_000;
+      if (!fresh && n.status === 'WORKING') {
+        try {
+          role = await this.waha.myRole(n.session, r.chat_id);
+          known = true;
+          await this.db.query('update wa_groups set my_role=$3, role_checked_at=now() where number_id=$1 and chat_id=$2', [numberId, r.chat_id, role]);
+        } catch (e) { this.log.warn(`Role check failed for ${r.chat_id}: ${(e as Error).message}`); }
+      }
+      // Unknown (WhatsApp couldn't be asked) → let it try; known → only admins may post
+      out.set(r.chat_id, !known || role === 'admin' || role === 'superadmin');
+    }
+    return out;
   }
 
   /** After a WAHA crash the session needs a few seconds to come back. */
