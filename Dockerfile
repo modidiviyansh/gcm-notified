@@ -20,7 +20,7 @@ RUN npm run build && npm prune --omit=dev
 
 # ---------- 3. runtime ----------
 FROM node:22-alpine
-RUN apk add --no-cache tini tzdata
+RUN apk add --no-cache tini tzdata curl
 ENV NODE_ENV=production \
     PORT=3000 \
     DATA_DIR=/data \
@@ -36,6 +36,6 @@ USER node
 VOLUME /data
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD wget -qO- http://127.0.0.1:3000/api/health >/dev/null || exit 1
+  CMD curl -fsS http://127.0.0.1:3000/api/health >/dev/null || exit 1
 ENTRYPOINT ["/sbin/tini", "--"]
 CMD ["node", "dist/main.js"]
