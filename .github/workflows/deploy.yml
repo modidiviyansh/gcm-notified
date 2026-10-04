@@ -1,0 +1,86 @@
+# Test → build image → push to GHCR → tell Coolify to redeploy.
+#
+# Repository secrets (Settings → Secrets and variables → Actions):
+#   COOLIFY_URL       e.g. https://coolify.example.com
+#   COOLIFY_APP_UUID  the GCM Notified application uuid in Coolify
+#   COOLIFY_TOKEN     a Coolify API token with ONLY the "deploy" permission
+# Without them the image is still built and pushed; Coolify just isn't triggered.
+
+name: Build & deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/gcm-notified
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            server/package-lock.json
+            web/package-lock.json
+      - name: Server — install, typecheck, test
+        working-directory: server
+        run: npm ci --no-audit --no-fund && npm run typecheck && npm test
+      - name: Dashboard — install, build
+        working-directory: web
+        run: npm ci --no-audit --no-fund && npm run build
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Coolify deployment
+        env:
+          COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
+          COOLIFY_APP_UUID: ${{ secrets.COOLIFY_APP_UUID }}
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+        run: |
+          if [ -z "$COOLIFY_URL" ] || [ -z "$COOLIFY_APP_UUID" ] || [ -z "$COOLIFY_TOKEN" ]; then
+            echo "::notice::Coolify secrets not set — image pushed, deployment not triggered."
+            exit 0
+          fi
+          url="${COOLIFY_URL%/}/api/v1/deploy?uuid=${COOLIFY_APP_UUID}&force=false"
+          curl -fsS -X POST -H "Authorization: Bearer ${COOLIFY_TOKEN}" "$url" \
+            || curl -fsS -H "Authorization: Bearer ${COOLIFY_TOKEN}" "$url"
