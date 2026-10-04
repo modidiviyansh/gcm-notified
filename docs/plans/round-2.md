@@ -4,17 +4,16 @@ Build order: **A → B → C**. Each part is deployed and tested before the next
 
 ---
 
-## A. Number privacy
+## A. Number privacy (display-only)
 
-**Goal:** phone numbers are hidden everywhere by default; the last 4 digits identify a person.
+**Goal:** phone numbers are hidden on screen by default; the last 4 digits identify a person.
 
-- The **server masks** every phone number in every response (`•••••• 3210`), so full numbers never reach the browser unless asked for.
-  Applies to contacts, students (father/mother/student), opt-outs, campaign logs, test sends, our own sender numbers.
-- Each masked number carries an encrypted reference. The **👁 button** sends it to `POST /api/reveal` and shows the full number
-  with a **copy** button; it **hides again after 30 s** (configurable) or when you leave the page.
-- **Show all on this page** (one button) for when you really need it — one request, one log entry.
-- **Every reveal is written to Activity** ("viewed number ending 3210 on Contacts").
-- **Search keeps working** on hidden numbers (search "3210" or the full number).
+- Hiding happens **in the browser only** — no extra requests. The server sends numbers as before.
+  (Protects against people looking at the screen, not against a signed-in user opening developer tools.)
+- Applies to contacts, students (father/mother), opt-outs, campaign reports and our own sender numbers.
+- **👁 button** shows the number instantly with a **copy** button; it hides again after 30 s (configurable)
+  or when you leave the page. **Show all numbers / Hide numbers** for the whole table.
+- **Search keeps working** (search "3210" or the full number).
 - **Settings → Privacy:** hide numbers on/off, re-hide time.
 
 ---
