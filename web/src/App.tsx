@@ -10,6 +10,7 @@ import CampaignEditor from './pages/CampaignEditor';
 import CampaignDetail from './pages/CampaignDetail';
 import Settings from './pages/Settings';
 import Activity from './pages/Activity';
+import { PrivacyProvider } from './components/phone';
 
 const NAV = [
   { to: '/', label: 'Dashboard', icon: '◧' },
@@ -70,6 +71,7 @@ export default function App() {
         </header>
         <main className="min-w-0 flex-1 overflow-y-auto p-4 md:p-6">
           <div className="mx-auto max-w-6xl">
+            <PrivacyProvider>
             <Routes>
               <Route path="/" element={<Dashboard />} />
               <Route path="/campaigns" element={<Campaigns />} />
@@ -81,6 +83,7 @@ export default function App() {
               <Route path="/settings" element={<Settings />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
+            </PrivacyProvider>
           </div>
         </main>
       </div>

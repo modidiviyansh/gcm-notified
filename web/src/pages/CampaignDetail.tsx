@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api, fmtDate, fmtPhone } from '../api';
+import { api, fmtDate } from '../api';
+import { Phone, RevealAll } from '../components/phone';
 import { Badge, Card, ErrorNote, PageHeader, Progress, Stat, statusTone, useLoad, useToast } from '../components/ui';
 
 const FILTERS = ['', 'queued', 'sent', 'delivered', 'read', 'failed', 'skipped'];
@@ -59,6 +60,7 @@ export default function CampaignDetail() {
           </Card>
         )}
         <Card title="Messages" actions={<>
+          <RevealAll />
           <input className="input w-48" placeholder="Search recipient / phone" value={q} onChange={(e) => setQ(e.target.value)} />
           <select className="input w-auto" value={filter} onChange={(e) => setFilter(e.target.value)}>{FILTERS.map((f) => <option key={f} value={f}>{f || 'All statuses'}</option>)}</select>
         </>}>
@@ -67,7 +69,7 @@ export default function CampaignDetail() {
               <thead><tr><th>Recipient</th><th>Status</th><th>From</th><th>Sent</th><th>Message</th></tr></thead>
               <tbody>{msgs?.map((m) => (
                 <tr key={m.id}>
-                  <td><div>{m.recipient}</div><div className="text-xs text-slate-500">{m.phone ? fmtPhone(m.phone) : m.chat_id}</div></td>
+                  <td><div>{m.recipient}</div><div className="text-xs text-slate-500">{m.phone ? <Phone value={m.phone} pref={m.phone_ref} /> : m.chat_id_ref ? <Phone value={m.chat_id} pref={m.chat_id_ref} /> : m.chat_id}</div></td>
                   <td><Badge tone={statusTone(m.status)}>{m.status}</Badge>{m.error && <div className="mt-1 max-w-56 text-xs text-red-600">{m.error}</div>}</td>
                   <td className="text-xs">{m.number_label ?? '—'}</td>
                   <td className="whitespace-nowrap text-xs text-slate-500">{fmtDate(m.sent_at)}</td>

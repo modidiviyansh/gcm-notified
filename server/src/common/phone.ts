@@ -27,4 +27,4 @@ export function phoneFromChatId(chatId: string | undefined | null): string | nul
   return m ? m[1] : null;
 }
 
-export const maskPhone = (p: string | null | undefined) => (p ? p.slice(0, 4) + '•••••' + p.slice(-3) : '');
+export const maskPhone = (p: string | null | undefined) => (p ? '•••••• ' + p.slice(-4) : '');

@@ -13,6 +13,7 @@ export interface AppSettings {
   alerts: { adminPhone: string; email: string; whatsapp: boolean; emailEnabled: boolean };
   frappe: { academicYear: string; excludePrograms: string[]; syncEveryHours: number };
   autoPause: { failureRatePct: number; minSamples: number };
+  privacy: { maskPhones: boolean; rehideSeconds: number };
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -29,6 +30,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   alerts: { adminPhone: '', email: '', whatsapp: true, emailEnabled: true },
   frappe: { academicYear: '', excludePrograms: ['Dummy', 'Dummy class'], syncEveryHours: 6 },
   autoPause: { failureRatePct: 5, minSamples: 20 },
+  privacy: { maskPhones: true, rehideSeconds: 30 },
 };
 
 @Injectable()

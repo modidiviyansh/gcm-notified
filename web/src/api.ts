@@ -39,7 +39,7 @@ export const api = {
 export const fmtDate = (d?: string | null) =>
   d ? new Date(d).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—';
 
-export const fmtPhone = (p?: string | null) => (p ? (p.startsWith('91') && p.length === 12 ? `+91 ${p.slice(2, 7)} ${p.slice(7)}` : `+${p}`) : '—');
+export const fmtPhone = (p?: string | null) => (p ? p.includes('•') ? p : (p.startsWith('91') && p.length === 12 ? `+91 ${p.slice(2, 7)} ${p.slice(7)}` : `+${p}`) : '—');
 
 export const fmtDuration = (mins: number) => {
   if (mins < 1) return '< 1 min';

@@ -83,6 +83,16 @@ export default function Settings() {
           <p className="mt-3 text-xs text-slate-500">Per-number warm-up (age, activity, business profile) is set on the <b>Numbers</b> page.</p>
         </Card>
 
+        <Card title="Privacy">
+          <div className="space-y-3">
+            <Toggle checked={s.privacy.maskPhones} onChange={(v) => set('privacy.maskPhones', v)} label="Hide phone numbers"
+              hint="Numbers show only their last 4 digits. Click the eye to see one; every view is written to Activity." />
+            <Field label="Hide again after (seconds)">
+              <input className="input" type="number" min={5} max={600} value={s.privacy.rehideSeconds} onChange={(e) => set('privacy.rehideSeconds', Math.min(600, Math.max(5, Number(e.target.value) || 30)))} />
+            </Field>
+          </div>
+        </Card>
+
         <Card title="Frappe sync">
           <div className="space-y-3">
             <Field label="Academic year" hint="Empty = latest academic year in Frappe"><input className="input" value={s.frappe.academicYear} onChange={(e) => set('frappe.academicYear', e.target.value)} placeholder="2026-2027" /></Field>

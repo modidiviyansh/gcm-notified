@@ -1,4 +1,5 @@
 import { BadRequestException, Body, Controller, Delete, Get, NotFoundException, Param, ParseIntPipe, Post, Put, Query, UploadedFile, UseInterceptors } from '@nestjs/common';
+import { decryptRef } from '../common/privacy';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { parse } from 'csv-parse/sync';
 import { Db } from '../db/db.service';
@@ -174,8 +175,11 @@ export class ContactsController {
     return { ok: true, phone };
   }
 
-  @Delete('opt-outs/:phone')
-  async removeOptOut(@Param('phone') phone: string) {
+  @Delete('opt-outs/:key')
+  async removeOptOut(@Param('key') key: string) {
+    // key is the masked number's reference (normal case) or a plain number
+    const phone = decryptRef(key) ?? normalizePhone(key);
+    if (!phone) throw new BadRequestException('Unknown number — reload the page');
     await this.db.query('delete from opt_outs where phone=$1', [phone]);
     return { ok: true };
   }

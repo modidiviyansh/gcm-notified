@@ -1,5 +1,6 @@
 import { ReactNode, useEffect, useState } from 'react';
-import { api, fmtDate, fmtPhone } from '../api';
+import { api, fmtDate } from '../api';
+import { Phone, RevealAll } from '../components/phone';
 import { Badge, Card, Empty, ErrorNote, Field, Modal, PageHeader, useLoad, useToast } from '../components/ui';
 
 export interface GroupNode {
@@ -151,7 +152,7 @@ function ListDetail({ list, root, onSelect, onAdd, onEdit, onSub, onDelete }: {
           {root.children.map((c) => <Chip key={c.id} active={list.id === c.id} onClick={() => onSelect(c.id)}>{c.name} ({c.contacts})</Chip>)}
         </div>
       )}
-      <input className="input mb-3" placeholder="Search name or phone" value={q} onChange={(e) => setQ(e.target.value)} />
+      <div className="mb-3 flex gap-2"><input className="input" placeholder="Search name or last digits of the number" value={q} onChange={(e) => setQ(e.target.value)} /><RevealAll /></div>
       {contacts.length > 0 ? (
         <div className="overflow-x-auto">
           <table className="table">
@@ -159,7 +160,7 @@ function ListDetail({ list, root, onSelect, onAdd, onEdit, onSub, onDelete }: {
             <tbody>{contacts.map((c) => (
               <tr key={c.id}>
                 <td>{c.name ?? <span className="text-slate-400">—</span>}</td>
-                <td className="whitespace-nowrap">{fmtPhone(c.phone)} {c.opted_out && <Badge tone="amber">opted out</Badge>}</td>
+                <td className="whitespace-nowrap"><Phone value={c.phone} pref={c.phone_ref} /> {c.opted_out && <Badge tone="amber">opted out</Badge>}</td>
                 {extraCols.map((k) => <td key={k} className="text-xs text-slate-600">{c.extra?.[k] ?? ''}</td>)}
                 <td className="text-right"><button className="text-xs text-red-600 hover:underline" onClick={() => remove(c.id)}>Remove</button></td>
               </tr>))}</tbody>
@@ -182,15 +183,15 @@ function AllContacts() {
   const { data } = useLoad(() => api.get<any[]>(`/contacts?q=${encodeURIComponent(q)}`), [q]);
   return (
     <Card title={<span className="flex flex-col"><span className="text-base">All contacts</span><span className="text-xs font-normal text-slate-500">Everyone in your lists, once per number</span></span>}>
-      <input className="input mb-3" placeholder="Search name or phone" value={q} onChange={(e) => setQ(e.target.value)} autoFocus />
+      <div className="mb-3 flex gap-2"><input className="input" placeholder="Search name or last digits of the number" value={q} onChange={(e) => setQ(e.target.value)} autoFocus /><RevealAll /></div>
       {!data?.length ? <Empty>{q ? 'Nobody matches your search.' : 'No contacts yet.'}</Empty> : (
         <div className="overflow-x-auto">
           <table className="table">
             <thead><tr><th>Name</th><th>Phone</th><th>Lists</th></tr></thead>
             <tbody>{data.map((c) => (
-              <tr key={c.phone}>
+              <tr key={c.phone_ref ?? c.phone}>
                 <td>{c.name ?? <span className="text-slate-400">—</span>}</td>
-                <td className="whitespace-nowrap">{fmtPhone(c.phone)} {c.opted_out && <Badge tone="amber">opted out</Badge>}</td>
+                <td className="whitespace-nowrap"><Phone value={c.phone} pref={c.phone_ref} /> {c.opted_out && <Badge tone="amber">opted out</Badge>}</td>
                 <td><div className="flex flex-wrap gap-1">{c.lists.map((l: string) => <Badge key={l}>{l}</Badge>)}</div></td>
               </tr>))}</tbody>
           </table>
@@ -316,7 +317,7 @@ function Students({ group }: { group: GroupNode }) {
   const [q, setQ] = useState('');
   const { data } = useLoad(() => api.get(`/groups/${group.id}/members?q=${encodeURIComponent(q)}`), [group.id, q]);
   return (
-    <Card title={<>{group.name} <Badge tone="blue">Frappe</Badge></>}>
+    <Card title={<>{group.name} <Badge tone="blue">Frappe</Badge></>} actions={<RevealAll />}>
       <input className="input mb-3" placeholder="Search student name or admission no." value={q} onChange={(e) => setQ(e.target.value)} />
       {!data?.students?.length ? <Empty>No students{q ? ' match your search' : ''}.</Empty> : (
         <div className="overflow-x-auto">
@@ -327,8 +328,8 @@ function Students({ group }: { group: GroupNode }) {
                 <td className="font-mono text-xs">{s.admission_no}</td>
                 <td>{s.student_name}</td>
                 <td className="text-xs">{s.section ?? '—'}</td>
-                <td className="text-xs">{s.father_name}<br /><span className={s.father_phone ? 'text-slate-500' : 'text-red-500'}>{s.father_phone ? fmtPhone(s.father_phone) : 'missing'}</span>{s.father_opted_out && <Badge tone="amber">opted out</Badge>}</td>
-                <td className="text-xs">{s.mother_name}<br /><span className={s.mother_phone ? 'text-slate-500' : 'text-red-500'}>{s.mother_phone ? fmtPhone(s.mother_phone) : 'missing'}</span>{s.mother_opted_out && <Badge tone="amber">opted out</Badge>}</td>
+                <td className="text-xs">{s.father_name}<br /><Phone value={s.father_phone} pref={s.father_phone_ref} className="text-slate-500" missing={<span className="text-red-500">missing</span>} />{s.father_opted_out && <Badge tone="amber">opted out</Badge>}</td>
+                <td className="text-xs">{s.mother_name}<br /><Phone value={s.mother_phone} pref={s.mother_phone_ref} className="text-slate-500" missing={<span className="text-red-500">missing</span>} />{s.mother_opted_out && <Badge tone="amber">opted out</Badge>}</td>
               </tr>))}</tbody>
           </table>
         </div>
@@ -389,13 +390,16 @@ function OptOuts() {
   const { data, reload } = useLoad(() => api.get<any[]>('/opt-outs'), []);
   const [phone, setPhone] = useState('');
   const add = async () => { try { await api.post('/opt-outs', { phone }); setPhone(''); reload(); } catch (e) { toast((e as Error).message, 'error'); } };
-  const remove = async (p: string) => { if (confirm('Allow messages to this number again?')) { await api.del(`/opt-outs/${p}`); reload(); } };
+  const remove = async (key: string) => {
+    if (!confirm('Allow messages to this number again?')) return;
+    try { await api.del(`/opt-outs/${encodeURIComponent(key)}`); reload(); } catch (e) { toast((e as Error).message, 'error'); }
+  };
   return (
-    <Card title={`Opted out (${data?.length ?? 0})`} actions={<div className="flex gap-2"><input className="input w-56" placeholder="Add number manually" value={phone} onChange={(e) => setPhone(e.target.value)} /><button className="btn-secondary" disabled={!phone} onClick={add}>Add</button></div>}>
+    <Card title={`Opted out (${data?.length ?? 0})`} actions={<div className="flex gap-2"><RevealAll /><input className="input w-56" placeholder="Add number manually" value={phone} onChange={(e) => setPhone(e.target.value)} /><button className="btn-secondary" disabled={!phone} onClick={add}>Add</button></div>}>
       <p className="mb-3 text-sm text-slate-500">People who replied <b>STOP</b> or <b>UNSUBSCRIBE</b>. They are skipped in every campaign, whichever list they are in.</p>
       {!data?.length ? <Empty>Nobody has opted out.</Empty> : (
         <table className="table"><thead><tr><th>Phone</th><th>How</th><th>When</th><th /></tr></thead>
-          <tbody>{data.map((o) => <tr key={o.phone}><td>{fmtPhone(o.phone)}</td><td>{o.reason}</td><td className="text-xs text-slate-500">{fmtDate(o.created_at)}</td><td className="text-right"><button className="text-xs text-brand-700 hover:underline" onClick={() => remove(o.phone)}>Re-allow</button></td></tr>)}</tbody>
+          <tbody>{data.map((o) => <tr key={o.phone_ref ?? o.phone}><td><Phone value={o.phone} pref={o.phone_ref} /></td><td>{o.reason}</td><td className="text-xs text-slate-500">{fmtDate(o.created_at)}</td><td className="text-right"><button className="text-xs text-brand-700 hover:underline" onClick={() => remove(o.phone_ref ?? o.phone)}>Re-allow</button></td></tr>)}</tbody>
         </table>
       )}
     </Card>

@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ScheduleModule } from '@nestjs/schedule';
 import { Db } from './db/db.service';
 import { AuthController, AuthGuard } from './auth/auth';
@@ -16,15 +16,17 @@ import { CampaignsService } from './campaigns/campaigns.service';
 import { CampaignsController, TemplatesController } from './campaigns/campaigns.controller';
 import { SenderService } from './sender/sender.service';
 import { WebhooksController } from './webhooks/webhooks.controller';
+import { PhoneMaskInterceptor, PrivacyController } from './privacy/privacy';
 
 @Module({
   imports: [ScheduleModule.forRoot()],
   controllers: [
     AuthController, SettingsController, NumbersController, ContactsController, MediaController,
-    CampaignsController, TemplatesController, WebhooksController,
+    CampaignsController, TemplatesController, WebhooksController, PrivacyController,
   ],
   providers: [
     { provide: APP_GUARD, useClass: AuthGuard },
+    { provide: APP_INTERCEPTOR, useClass: PhoneMaskInterceptor },
     Db, WahaClient, SettingsService, AlertsService, NumbersService, FrappeSyncService, CampaignsService, SenderService,
   ],
 })
