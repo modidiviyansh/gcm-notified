@@ -20,34 +20,52 @@ export class ContactsController {
   @Get('groups')
   async tree() {
     const rows = await this.db.query(`
-      select g.id, g.parent_id, g.name, g.source, g.sort_order,
+      select g.id, g.parent_id, g.name, g.source, g.sort_order, g.description, g.created_at,
         (select count(*)::int from students s where s.group_id = g.id and s.active) as students,
         (select count(*)::int from contacts c where c.group_id = g.id) as contacts
       from contact_groups g order by g.source, g.sort_order, g.name`);
     const byId = new Map<number, any>(rows.map((r) => [r.id, { ...r, children: [] }]));
     const roots: any[] = [];
     for (const g of byId.values()) (g.parent_id && byId.get(g.parent_id) ? byId.get(g.parent_id).children : roots).push(g);
+    // A person in a list and one of its sublists counts once
+    const people = new Map((await this.db.query<{ root: number; n: number }>(
+      `select coalesce(g.parent_id, g.id) as root, count(distinct c.phone)::int as n
+       from contacts c join contact_groups g on g.id = c.group_id group by 1`)).map((r) => [r.root, r.n]));
     for (const r of roots) {
-      r.total = r.students + r.contacts + r.children.reduce((a: number, c: any) => a + c.students + c.contacts, 0);
+      r.total = r.students + r.children.reduce((a: number, c: any) => a + c.students, 0) + (people.get(r.id) ?? 0);
     }
     return roots;
   }
 
   @Post('groups')
-  async createGroup(@Body() b: { name: string; parent_id?: number | null }) {
+  async createGroup(@Body() b: { name: string; parent_id?: number | null; description?: string | null }) {
     if (!b.name?.trim()) throw new BadRequestException('Name is required');
     if (b.parent_id) {
       const p = await this.db.one('select source, parent_id from contact_groups where id=$1', [b.parent_id]);
       if (!p) throw new NotFoundException('Parent group not found');
       if (p.source !== 'manual' || p.parent_id) throw new BadRequestException('Subgroups can only be added to a top-level manual group');
     }
-    return this.db.one(`insert into contact_groups(name, parent_id, source) values ($1,$2,'manual') returning *`, [b.name.trim(), b.parent_id ?? null]);
+    return this.db.one(`insert into contact_groups(name, parent_id, source, description) values ($1,$2,'manual',$3) returning *`,
+      [b.name.trim(), b.parent_id ?? null, b.description?.trim() || null]);
   }
 
   @Put('groups/:id')
-  async renameGroup(@Param('id', ParseIntPipe) id: number, @Body() b: { name: string }) {
+  async renameGroup(@Param('id', ParseIntPipe) id: number, @Body() b: { name?: string; description?: string | null }) {
     const g = await this.manualGroup(id);
-    return this.db.one('update contact_groups set name=$2 where id=$1 returning *', [g.id, b.name?.trim() || g.name]);
+    return this.db.one('update contact_groups set name=$2, description=$3 where id=$1 returning *',
+      [g.id, b.name?.trim() || g.name, b.description === undefined ? g.description : b.description?.trim() || null]);
+  }
+
+  /** Everyone in your own lists, one row per phone number, with the lists they are in. */
+  @Get('contacts')
+  allContacts(@Query('q') q = '') {
+    return this.db.query(
+      `select c.phone, max(c.name) as name, array_agg(distinct g.name order by g.name) as lists,
+              bool_or(c.phone in (select phone from opt_outs)) as opted_out, min(c.created_at) as created_at
+       from contacts c join contact_groups g on g.id = c.group_id
+       where ($1 = '' or c.name ilike $2 or ($3 <> '%%' and c.phone like $3))
+       group by c.phone order by max(c.name) nulls last, c.phone limit 2000`,
+      [q, `%${q}%`, `%${q.replace(/\D/g, '')}%`]);
   }
 
   @Delete('groups/:id')
@@ -66,10 +84,14 @@ export class ContactsController {
        from students s join contact_groups g on g.id = s.group_id
        where s.active and (g.id = $1 or g.parent_id = $1) and ($2 = '' or s.student_name ilike $3 or s.admission_no ilike $3)
        order by s.section, s.student_name limit 2000`, [id, q, like]);
+    // List + its sublists, once per phone (the list's own entry wins over a sublist's)
     const contacts = await this.db.query(
-      `select c.id, c.name, c.phone, c.extra, (c.phone in (select phone from opt_outs)) as opted_out
-       from contacts c join contact_groups g on g.id = c.group_id
-       where (g.id = $1 or g.parent_id = $1) and ($2 = '' or c.name ilike $3 or c.phone ilike $3) order by c.name limit 2000`, [id, q, like]);
+      `select * from (
+         select distinct on (c.phone) c.id, c.name, c.phone, c.extra, (c.phone in (select phone from opt_outs)) as opted_out
+         from contacts c join contact_groups g on g.id = c.group_id
+         where (g.id = $1 or g.parent_id = $1) and ($2 = '' or c.name ilike $3 or c.phone ilike $3)
+         order by c.phone, (g.id = $1) desc, c.id
+       ) x order by name nulls last, phone limit 2000`, [id, q, like]);
     return { students, contacts };
   }
 

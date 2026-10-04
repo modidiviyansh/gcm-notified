@@ -1,18 +1,20 @@
 import { BadRequestException, Injectable, Logger, NotFoundException, OnApplicationBootstrap } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import { Db } from '../db/db.service';
-import { WahaClient, WahaError } from '../waha/waha.client';
+import { WahaClient, WahaError, WahaSession, WaTarget } from '../waha/waha.client';
 import { AlertsService } from '../alerts/alerts.service';
 import { SettingsService } from '../settings/settings.service';
 import { effectiveCap, levelFor, nextCap, warmupScore, WarmupInput } from './warmup';
 import { localDate } from '../common/time';
 import { maskPhone, phoneFromChatId } from '../common/phone';
+import { analyseChats, Detection, limitBlockReason, parseLimits, WaLimits } from './detect';
 
 export interface NumberRow extends WarmupInput {
   id: number; label: string; session: string; phone: string | null; push_name: string | null;
   status: string; status_at: Date; paused: boolean; pause_reason: string | null;
   daily_cap: number; max_cap: number; cap_override: number | null; ramp_enabled: boolean;
   sent_today: number; failed_today: number; counter_date: string | null; disconnects_today: number;
+  warmup_source: 'manual' | 'auto' | 'pending'; detected: Detection | null; detected_at: Date | null; wa_limits: WaLimits | null;
 }
 
 const WARMUP_FIELDS = ['age_months', 'avg_chats_day', 'is_business', 'saved_by_contacts', 'past_ban'] as const;
@@ -21,6 +23,9 @@ const WARMUP_FIELDS = ['age_months', 'avg_chats_day', 'is_business', 'saved_by_c
 export class NumbersService implements OnApplicationBootstrap {
   private readonly log = new Logger('Numbers');
   private pendingDisconnect = new Map<number, NodeJS.Timeout>();
+  /** Group refreshes are heavy for WAHA: never run two at once, for any number. */
+  private refreshing: number | null = null;
+  private detecting = new Set<number>();
 
   constructor(private readonly db: Db, private readonly waha: WahaClient, private readonly alerts: AlertsService, private readonly settings: SettingsService) {}
 
@@ -46,19 +51,22 @@ export class NumbersService implements OnApplicationBootstrap {
     return n;
   }
 
-  async create(body: { label: string } & Partial<WarmupInput> & { max_cap?: number }) {
+  async create(body: { label: string; details?: boolean } & Partial<WarmupInput> & { max_cap?: number }) {
     const label = (body.label ?? '').trim();
     if (!label) throw new BadRequestException('Label is required');
     const base = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'number';
     let session = base;
     for (let i = 2; await this.db.one('select 1 from wa_numbers where session = $1', [session]); i++) session = `${base}-${i}`;
     const w = pickWarmup(body);
+    // Unknown age/activity → start Cold; detected and raised once the number connects
+    if (!body.details) { w.age_months = 0; w.avg_chats_day = 0; }
     const lvl = levelFor(warmupScore(w));
     const max = body.max_cap ?? (await this.settings.get()).defaultMaxCap;
     const row = await this.db.one<NumberRow>(
-      `insert into wa_numbers(label, session, age_months, avg_chats_day, is_business, saved_by_contacts, past_ban, daily_cap, max_cap, counter_date)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) returning *`,
-      [label, session, w.age_months, w.avg_chats_day, w.is_business, w.saved_by_contacts, w.past_ban, Math.min(lvl.startCap, max), max, localDate()],
+      `insert into wa_numbers(label, session, age_months, avg_chats_day, is_business, saved_by_contacts, past_ban, daily_cap, max_cap, counter_date, warmup_source)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) returning *`,
+      [label, session, w.age_months, w.avg_chats_day, w.is_business, w.saved_by_contacts, w.past_ban, Math.min(lvl.startCap, max), max, localDate(),
+       body.details ? 'manual' : 'pending'],
     );
     try {
       await this.waha.createSession(session, { app: 'gcm-notified', numberId: String(row!.id) });
@@ -87,9 +95,10 @@ export class NumbersService implements OnApplicationBootstrap {
     const override = body.cap_override === undefined ? n.cap_override : body.cap_override === null || (body.cap_override as any) === '' ? null : Math.max(0, Number(body.cap_override));
     await this.db.query(
       `update wa_numbers set label=$2, age_months=$3, avg_chats_day=$4, is_business=$5, saved_by_contacts=$6, past_ban=$7,
-         daily_cap=$8, max_cap=$9, cap_override=$10, ramp_enabled=$11 where id=$1`,
+         daily_cap=$8, max_cap=$9, cap_override=$10, ramp_enabled=$11,
+         warmup_source = case when $12 then 'manual' else warmup_source end where id=$1`,
       [id, body.label?.trim() || n.label, w.age_months, w.avg_chats_day, w.is_business, w.saved_by_contacts, w.past_ban,
-       daily, max, override, body.ramp_enabled ?? n.ramp_enabled],
+       daily, max, override, body.ramp_enabled ?? n.ramp_enabled, (['age_months', 'avg_chats_day'] as const).some((k) => body[k] !== undefined && Number(body[k]) !== n[k])],
     );
     return this.decorate(await this.get(id));
   }
@@ -124,21 +133,114 @@ export class NumbersService implements OnApplicationBootstrap {
     return this.waha.requestCode(n.session, phone.replace(/\D/g, ''));
   }
 
+  /**
+   * Reloads the groups & channels a number can post to, and stores them (campaign pickers read the stored copy).
+   * Full group list first; if WAHA can't produce it (too many groups for its memory) fall back to the groups
+   * in the recent chat list so the admin still gets something usable.
+   */
   async refreshGroups(id: number) {
     const n = await this.get(id);
     if (n.status !== 'WORKING') throw new BadRequestException('Number is not connected');
-    const groups = await this.waha.listGroups(n.session);
-    await this.db.tx(async (c) => {
-      await c.query('delete from wa_groups where number_id=$1', [id]);
-      for (const g of groups) {
-        await c.query('insert into wa_groups(number_id, chat_id, subject, participants) values ($1,$2,$3,$4) on conflict do nothing', [id, g.chatId, g.subject, g.participants]);
+    if (this.refreshing !== null) throw new BadRequestException('Another number is loading its groups right now — try again in a minute');
+    this.refreshing = id;
+    let warning: string | null = null;
+    let source: 'full' | 'chats' = 'full';
+    try {
+      let groups: WaTarget[];
+      try {
+        groups = await this.waha.listGroups(n.session);
+      } catch (e) {
+        this.log.warn(`Full group list failed for "${n.label}": ${(e as Error).message}`);
+        await this.waitForWaha(n.session);
+        groups = await this.waha.groupsFromChats(n.session).catch(() => []);
+        source = 'chats';
+        warning = `The full group list could not be loaded (WhatsApp engine ran out of memory or timed out). Showing ${groups.length} groups from recent chats instead.`;
       }
-    });
-    return this.groups(id);
+      let channels: WaTarget[] = [];
+      try { channels = await this.waha.listChannels(n.session); } catch (e) { this.log.warn(`Channels failed for "${n.label}": ${(e as Error).message}`); }
+      await this.db.tx(async (c) => {
+        await c.query('delete from wa_groups where number_id=$1', [id]);
+        for (const g of [...channels, ...groups]) {
+          await c.query(
+            `insert into wa_groups(number_id, chat_id, subject, participants, kind, announce, role, source) values ($1,$2,$3,$4,$5,$6,$7,$8) on conflict do nothing`,
+            [id, g.chatId, g.subject, g.participants, g.kind, g.announce, g.role, g.kind === 'channel' ? 'full' : source]);
+        }
+      });
+      await this.db.event('number', `"${n.label}": ${groups.length} groups${source === 'chats' ? ' (from recent chats)' : ''} and ${channels.length} channels loaded`, warning ? 'warn' : 'info');
+    } finally {
+      this.refreshing = null;
+    }
+    return { items: await this.groups(id), source, warning };
   }
 
   groups(id: number) {
-    return this.db.query('select chat_id, subject, participants, refreshed_at from wa_groups where number_id=$1 order by subject', [id]);
+    return this.db.query(
+      `select chat_id, subject, participants, kind, announce, role, source, refreshed_at from wa_groups where number_id=$1
+       order by kind desc, lower(subject)`, [id]);
+  }
+
+  /** After a WAHA crash the session needs a few seconds to come back. */
+  private async waitForWaha(session: string, maxMs = 90_000) {
+    const end = Date.now() + maxMs;
+    while (Date.now() < end) {
+      const s = await this.waha.getSession(session).catch(() => null);
+      if (s?.status === 'WORKING') return;
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+  }
+
+  // ---- warm-up auto-detection ----
+
+  /** Reads account age / activity from WhatsApp. With apply=true the results replace the warm-up inputs. */
+  async detect(id: number, apply: boolean) {
+    const n = await this.get(id);
+    if (n.status !== 'WORKING') throw new BadRequestException('Connect the number first — details are read from WhatsApp');
+    if (this.detecting.has(id)) throw new BadRequestException('Detection is already running for this number');
+    this.detecting.add(id);
+    try {
+      const [recent, oldest] = await Promise.all([this.waha.chats(n.session, 500, 'desc'), this.waha.chats(n.session, 1, 'asc')]);
+      const counts = await this.db.one<{ groups: number; channels: number }>(
+        `select count(*) filter (where kind='group')::int groups, count(*) filter (where kind='channel')::int channels from wa_groups where number_id=$1`, [id]);
+      const known = await this.db.one('select 1 from wa_groups where number_id=$1 limit 1', [id]);
+      const detection: Detection = {
+        at: new Date().toISOString(),
+        ...analyseChats(recent, oldest[0]?.ts ?? null),
+        groups: known ? counts!.groups : null,
+        channelsAdmin: known ? counts!.channels : null,
+      };
+      await this.db.query('update wa_numbers set detected=$2, detected_at=now() where id=$1', [id, detection]);
+      if (apply) {
+        const w = { ...pick(n), avg_chats_day: detection.chatsPerDay, ...(detection.ageMonths !== null ? { age_months: detection.ageMonths } : {}) };
+        const oldLevel = levelFor(warmupScore(n)).level;
+        const lvl = levelFor(warmupScore(w));
+        const daily = lvl.level !== oldLevel ? Math.min(lvl.startCap, n.max_cap) : n.daily_cap;
+        await this.db.query(`update wa_numbers set age_months=$2, avg_chats_day=$3, daily_cap=$4, warmup_source='auto' where id=$1`,
+          [id, w.age_months, w.avg_chats_day, daily]);
+        await this.db.event('warmup', `"${n.label}" details detected: ~${w.age_months} months, ~${w.avg_chats_day} chats/day → ${lvl.level}`);
+      }
+      return { detection, number: this.decorate(await this.get(id)) };
+    } finally {
+      this.detecting.delete(id);
+    }
+  }
+
+  // ---- WhatsApp's own limits ----
+
+  /** Stores messageCapping / reachoutTimelock and pauses the number while WhatsApp restricts it. */
+  private async applyLimits(n: NumberRow, me: WahaSession['me']) {
+    if (!me || (me.messageCapping === undefined && me.reachoutTimelock === undefined)) return;
+    const limits = parseLimits(me);
+    await this.db.query('update wa_numbers set wa_limits=$2 where id=$1', [n.id, limits]);
+    const reason = limitBlockReason(limits);
+    const autoPaused = n.paused && (n.pause_reason ?? '').startsWith('WhatsApp limit:');
+    if (reason && !n.paused) {
+      await this.setPaused(n.id, true, reason);
+      await this.db.event('number', `"${n.label}" paused: ${reason}`, 'warn');
+      await this.alerts.send(`limit:${n.id}`, `WhatsApp restricted: ${n.label}`, `${reason} Sending from "${n.label}" is paused and resumes automatically when the limit is lifted.`, n.id);
+    } else if (!reason && autoPaused) {
+      await this.setPaused(n.id, false);
+      await this.db.event('number', `"${n.label}" resumed: WhatsApp limit lifted`);
+    }
   }
 
   // ---- status handling (webhook + polling) ----
@@ -154,6 +256,10 @@ export class NumbersService implements OnApplicationBootstrap {
     if (status === 'WORKING') {
       const t = this.pendingDisconnect.get(n.id);
       if (t) { clearTimeout(t); this.pendingDisconnect.delete(n.id); }
+      // Freshly linked: give WhatsApp a moment to sync chat history, then read the warm-up details
+      if (n.warmup_source === 'pending') {
+        setTimeout(() => this.detect(n.id, true).catch((e) => this.log.warn(`Auto-detect for "${n.label}" failed: ${e.message}`)), 45_000);
+      }
       return;
     }
     if (n.status === 'WORKING') {
@@ -193,6 +299,7 @@ export class NumbersService implements OnApplicationBootstrap {
     for (const n of rows) {
       const s = byName.get(n.session);
       await this.onStatus(n.session, s?.status ?? 'STOPPED', s?.me);
+      if (s?.status === 'WORKING') await this.applyLimits(n, s.me).catch((e) => this.log.warn(`Limits for "${n.label}": ${e.message}`));
     }
   }
 

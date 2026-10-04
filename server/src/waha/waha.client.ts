@@ -10,7 +10,13 @@ export class WahaError extends Error {
 export interface WahaSession {
   name: string;
   status: string;
-  me?: { id: string; pushName?: string } | null;
+  me?: { id: string; pushName?: string; messageCapping?: unknown; reachoutTimelock?: unknown } | null;
+}
+
+/** Something a number can post into: a WhatsApp group or a channel it administers. */
+export interface WaTarget {
+  chatId: string; subject: string; participants: number | null;
+  announce: boolean; kind: 'group' | 'channel'; role: string | null;
 }
 
 export interface WahaFile { mimetype: string; filename: string; data: string }
@@ -94,22 +100,59 @@ export class WahaClient {
     return this.call<{ lid: string; pn?: string }>('GET', `/api/${encodeURIComponent(session)}/lids/${encodeURIComponent(lid)}`);
   }
 
-  // ---- groups ----
-  async listGroups(session: string): Promise<{ chatId: string; subject: string; participants: number | null }[]> {
-    await this.call('POST', `/api/${encodeURIComponent(session)}/groups/refresh`, undefined, 60_000).catch(() => undefined);
-    const raw = await this.call<any>('GET', `/api/${encodeURIComponent(session)}/groups`, undefined, 60_000);
+  // ---- groups & channels ----
+  /**
+   * Full group list in ONE request, without member lists. GOWS fetches every group from WhatsApp on each
+   * call (limit/offset don't make it cheaper), so never page and never ask for participants — on numbers
+   * that are in hundreds of groups that is what runs WAHA out of memory.
+   */
+  async listGroups(session: string): Promise<WaTarget[]> {
+    const raw = await this.call<any>('GET', `/api/${encodeURIComponent(session)}/groups?exclude=participants`, undefined, 180_000);
     const list: any[] = Array.isArray(raw) ? raw : Object.values(raw ?? {});
     return list
+      .filter((g) => !(g?.IsParent ?? g?.isParent)) // community "parent" groups can't receive messages
       .map((g) => {
         const id = g?.id?._serialized ?? g?.id ?? g?.JID ?? g?.jid;
         const parts = g?.participants ?? g?.Participants;
+        const count = g?.ParticipantCount ?? g?.participantsCount ?? g?.size ?? (Array.isArray(parts) ? parts.length : null);
         return {
           chatId: typeof id === 'string' ? id : String(id ?? ''),
           subject: g?.subject ?? g?.Name ?? g?.name ?? '(no name)',
-          participants: Array.isArray(parts) ? parts.length : null,
+          participants: typeof count === 'number' ? count : null,
+          announce: !!(g?.IsAnnounce ?? g?.announce ?? g?.isAnnounce),
+          kind: 'group' as const, role: null,
         };
       })
       .filter((g) => g.chatId.endsWith('@g.us'));
+  }
+
+  /** Cheap fallback: groups that appear in the recent chat list (local store, no WhatsApp round-trip). */
+  async groupsFromChats(session: string): Promise<WaTarget[]> {
+    const chats = await this.chats(session, 1000);
+    return chats.filter((c) => c.id.endsWith('@g.us'))
+      .map((c) => ({ chatId: c.id, subject: c.name || '(no name)', participants: null, announce: false, kind: 'group' as const, role: null }));
+  }
+
+  /** Channels this number owns or administers (the only ones it can post to). */
+  async listChannels(session: string): Promise<WaTarget[]> {
+    const raw = await this.call<any[]>('GET', `/api/${encodeURIComponent(session)}/channels`, undefined, 60_000);
+    return (raw ?? [])
+      .filter((c) => ['OWNER', 'ADMIN'].includes(String(c?.role ?? '').toUpperCase()))
+      .map((c) => ({
+        chatId: String(c.id), subject: c.name || '(no name)', participants: typeof c.subscribersCount === 'number' ? c.subscribersCount : null,
+        announce: false, kind: 'channel' as const, role: String(c.role).toUpperCase(),
+      }))
+      .filter((c) => c.chatId.endsWith('@newsletter'));
+  }
+
+  /** Chat list from the local store: ids, names and last-activity timestamps only. */
+  async chats(session: string, limit: number, order: 'asc' | 'desc' = 'desc') {
+    const raw = await this.call<any[]>('GET',
+      `/api/${encodeURIComponent(session)}/chats?limit=${limit}&sortBy=conversationTimestamp&sortOrder=${order}`, undefined, 60_000);
+    return (raw ?? []).map((c) => ({
+      id: String(c?.id?._serialized ?? c?.id ?? ''), name: (c?.name as string | undefined) ?? null,
+      ts: Number(c?.conversationTimestamp ?? c?.timestamp ?? 0) || 0,
+    }));
   }
 
   // ---- sending ----

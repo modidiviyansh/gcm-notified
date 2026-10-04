@@ -32,7 +32,7 @@ export default function Campaigns() {
                 <tr key={c.id} className="hover:bg-slate-50">
                   <td>
                     <Link to={c.status === 'draft' ? `/campaigns/${c.id}/edit` : `/campaigns/${c.id}`} className="font-medium hover:underline">{c.name}</Link>
-                    <div className="text-xs text-slate-500">{c.kind === 'wa_groups' ? 'WhatsApp groups' : 'Contacts'}</div>
+                    <div className="text-xs text-slate-500">{c.kind === 'wa_groups' ? 'Groups & channels' : 'Contacts'}</div>
                   </td>
                   <td><Badge tone={statusTone(c.status)}>{c.status}</Badge></td>
                   <td>{c.total ? <><Progress value={c.sent + c.failed + c.skipped} max={c.total} /><div className="mt-1 text-xs text-slate-500">{c.sent}/{c.total}</div></> : '—'}</td>
@@ -48,8 +48,8 @@ export default function Campaigns() {
       <Modal open={creating} onClose={() => setCreating(false)} title="New campaign">
         <Field label="Name"><input className="input" autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Diwali wishes 2026" /></Field>
         <div className="mt-4 grid gap-3 sm:grid-cols-2">
-          {([['contacts', 'Parents & contacts', 'Classes, sections, your groups or a CSV (marks, fees…). Personal 1-to-1 messages.'],
-             ['wa_groups', 'WhatsApp groups', 'Post into WhatsApp groups that your numbers are members of.']] as const).map(([k, t, d]) => (
+          {([['contacts', 'Contacts', 'Personal 1-to-1 messages to your contact lists, school classes or a CSV (marks, fees…).'],
+             ['wa_groups', 'WhatsApp groups & channels', 'Post into groups your numbers are in, or channels they manage.']] as const).map(([k, t, d]) => (
             <button key={k} onClick={() => setKind(k)} className={`rounded-lg border p-3 text-left ${kind === k ? 'border-brand-600 bg-brand-50 ring-2 ring-brand-100' : 'border-slate-200 hover:bg-slate-50'}`}>
               <div className="text-sm font-medium">{t}</div><div className="mt-1 text-xs text-slate-500">{d}</div>
             </button>

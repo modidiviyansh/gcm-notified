@@ -109,6 +109,90 @@ export function Toggle({ checked, onChange, label, hint }: { checked: boolean; o
   );
 }
 
+// ---------- searchable multi-select dropdown ----------
+export interface MsOption { value: string; label: string; group?: string; hint?: ReactNode; badge?: ReactNode; indent?: boolean; search?: string }
+
+/**
+ * Dropdown with search, grouped options and checkboxes. Selection logic stays with the caller
+ * (isChecked / onToggle) so hierarchies like class → sections can be handled there.
+ */
+export function MultiSelect({ options, isChecked, onToggle, onBulk, chips, onRemoveChip, placeholder = 'Select…', emptyText = 'Nothing to choose from', loading }: {
+  options: MsOption[];
+  isChecked: (o: MsOption) => boolean;
+  onToggle: (o: MsOption) => void;
+  onBulk?: (shown: MsOption[], on: boolean) => void;
+  chips: { value: string; label: ReactNode }[];
+  onRemoveChip: (value: string) => void;
+  placeholder?: string; emptyText?: ReactNode; loading?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState('');
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const down = (e: MouseEvent) => { if (box.current && !box.current.contains(e.target as Node)) setOpen(false); };
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', down);
+    document.addEventListener('keydown', key);
+    return () => { document.removeEventListener('mousedown', down); document.removeEventListener('keydown', key); };
+  }, [open]);
+
+  const needle = q.trim().toLowerCase();
+  const shown = needle ? options.filter((o) => (o.search ?? o.label).toLowerCase().includes(needle)) : options;
+  const groups: [string, MsOption[]][] = [];
+  for (const o of shown) {
+    const g = o.group ?? '';
+    const last = groups[groups.length - 1];
+    if (last && last[0] === g) last[1].push(o); else groups.push([g, [o]]);
+  }
+  const MAX_CHIPS = 8;
+
+  return (
+    <div className="relative" ref={box}>
+      <div role="button" tabIndex={0} onClick={() => setOpen((x) => !x)} onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), setOpen((x) => !x))}
+        className={`flex min-h-10 w-full cursor-pointer flex-wrap items-center gap-1.5 rounded-lg border bg-white px-2 py-1.5 text-sm transition ${open ? 'border-brand-600 ring-2 ring-brand-100' : 'border-slate-300 hover:border-slate-400'}`}>
+        {chips.length === 0 && <span className="px-1 text-slate-400">{placeholder}</span>}
+        {chips.slice(0, MAX_CHIPS).map((c) => (
+          <span key={c.value} className="inline-flex max-w-full items-center gap-1 rounded-md bg-brand-50 py-0.5 pl-2 pr-1 text-xs text-brand-800 ring-1 ring-inset ring-brand-100">
+            <span className="truncate">{c.label}</span>
+            <button type="button" aria-label="Remove" className="rounded px-1 hover:bg-brand-100" onClick={(e) => { e.stopPropagation(); onRemoveChip(c.value); }}>✕</button>
+          </span>
+        ))}
+        {chips.length > MAX_CHIPS && <span className="text-xs text-slate-500">+{chips.length - MAX_CHIPS} more</span>}
+        <span className="ml-auto pl-1 text-slate-400" aria-hidden>{open ? '▴' : '▾'}</span>
+      </div>
+      {open && (
+        <div className="absolute left-0 right-0 z-30 mt-1 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-xl">
+          <div className="flex items-center gap-2 border-b border-slate-100 p-2">
+            <input className="input py-1.5" autoFocus placeholder="Search…" value={q} onChange={(e) => setQ(e.target.value)} />
+            {onBulk && shown.length > 0 && <>
+              <button type="button" className="btn-ghost whitespace-nowrap px-2 py-1 text-xs" onClick={() => onBulk(shown, true)}>Select {needle ? 'shown' : 'all'} ({shown.length})</button>
+              <button type="button" className="btn-ghost whitespace-nowrap px-2 py-1 text-xs" onClick={() => onBulk(shown, false)}>Clear</button>
+            </>}
+          </div>
+          <div className="max-h-80 overflow-y-auto py-1">
+            {loading && <p className="px-3 py-4 text-center text-sm text-slate-500">Loading…</p>}
+            {!loading && !shown.length && <p className="px-3 py-4 text-center text-sm text-slate-500">{needle ? 'No matches' : emptyText}</p>}
+            {groups.map(([g, opts]) => (
+              <div key={g || '_'}>
+                {g && <div className="sticky top-0 z-10 bg-slate-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">{g} <span className="font-normal">({opts.length})</span></div>}
+                {opts.map((o) => (
+                  <label key={o.value} className={`flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm hover:bg-slate-50 ${o.indent ? 'pl-8 text-slate-600' : ''}`}>
+                    <input type="checkbox" checked={isChecked(o)} onChange={() => onToggle(o)} />
+                    <span className="min-w-0 flex-1 truncate">{o.label}</span>
+                    {o.badge}
+                    {o.hint !== undefined && <span className="shrink-0 text-xs text-slate-400">{o.hint}</span>}
+                  </label>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function Empty({ children }: { children: ReactNode }) {
   return <div className="rounded-lg border border-dashed border-slate-300 p-8 text-center text-sm text-slate-500">{children}</div>;
 }

@@ -1,7 +1,7 @@
 import { ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api, fmtDuration } from '../api';
-import { Badge, Card, Empty, ErrorNote, Field, Modal, PageHeader, statusLabel, Toggle, useLoad, useToast } from '../components/ui';
+import { api, fmtDate, fmtDuration } from '../api';
+import { Badge, Card, Empty, ErrorNote, Field, Modal, MsOption, MultiSelect, PageHeader, statusLabel, Toggle, useLoad, useToast } from '../components/ui';
 import type { GroupNode } from './Contacts';
 
 const STUDENT_VARS = ['student_name', 'first_name', 'admission_no', 'class', 'section', 'parent_name', 'father_name', 'mother_name', 'relation', 'child_count'];
@@ -50,7 +50,7 @@ export default function CampaignEditor() {
 
   return (
     <>
-      <PageHeader title={c.name} subtitle={<><Link to="/campaigns" className="text-brand-700 hover:underline">Campaigns</Link> / draft · {isGroups ? 'WhatsApp groups' : 'Parents & contacts'}</>}
+      <PageHeader title={c.name} subtitle={<><Link to="/campaigns" className="text-brand-700 hover:underline">Campaigns</Link> / draft · {isGroups ? 'WhatsApp groups & channels' : 'Contacts'}</>}
         actions={<button className="btn-ghost text-red-600" onClick={async () => { if (confirm('Delete this draft?')) { await api.del(`/campaigns/${id}`); nav('/campaigns'); } }}>Delete draft</button>} />
 
       <div className="space-y-5">
@@ -58,7 +58,7 @@ export default function CampaignEditor() {
           <input className="input max-w-md" value={c.name} onChange={(e) => patch({ name: e.target.value })} />
         </Step>
 
-        <Step n={2} title={isGroups ? 'Choose WhatsApp groups' : 'Who receives it'}>
+        <Step n={2} title={isGroups ? 'Choose WhatsApp groups & channels' : 'Who receives it'}>
           {isGroups ? <WaGroupsPicker c={c} numbers={numbers ?? []} onChange={(waGroups) => patch({ audience: { waGroups } })} />
             : <Audience c={c} primary={settings.primaryParent} onPatch={patch} onCsv={(info) => setData((o: any) => ({ ...o, audience: { ...o.audience, csv: info } }))} />}
         </Step>
@@ -116,25 +116,8 @@ function Audience({ c, primary, onPatch, onCsv }: { c: any; primary: string; onP
   const ids: number[] = c.audience.groupIds ?? [];
   const csv = c.audience.csv;
 
-  const toggle = (g: GroupNode) => {
-    let next: number[];
-    const parent = g.parent_id ? tree?.find((t) => t.id === g.parent_id) : undefined;
-    if (!parent) {
-      // Whole class / group: selecting it replaces any individually ticked sections
-      const childIds = g.children.map((x) => x.id);
-      next = ids.includes(g.id) ? ids.filter((x) => x !== g.id) : [...ids.filter((x) => !childIds.includes(x)), g.id];
-    } else if (ids.includes(parent.id)) {
-      // Unticking one section of a fully selected class → keep its other sections
-      next = [...ids.filter((x) => x !== parent.id), ...parent.children.map((x) => x.id).filter((x) => x !== g.id)];
-    } else if (ids.includes(g.id)) {
-      next = ids.filter((x) => x !== g.id);
-    } else {
-      next = [...ids, g.id];
-      // All sections ticked → store the class instead
-      if (parent.children.every((x) => next.includes(x.id))) next = [...next.filter((x) => !parent.children.some((c) => c.id === x)), parent.id];
-    }
-    onPatch({ audience: { groupIds: next } }, true);
-  };
+  const setIds = (next: number[]) => onPatch({ audience: { groupIds: normaliseIds(next, tree ?? []) } }, true);
+  const schoolPicked = ids.some((id) => (tree ?? []).some((g) => g.source === 'frappe' && (g.id === id || g.children.some((c) => c.id === id))));
   const upload = async (f?: File) => {
     if (!f) return;
     try { const r = await api.upload(`/campaigns/${c.id}/csv`, f); setCsvReport(r); onCsv(r); toast(`CSV: ${r.matched} of ${r.rows} rows matched`); } catch (e) { toast((e as Error).message, 'error'); }
@@ -145,28 +128,9 @@ function Audience({ c, primary, onPatch, onCsv }: { c: any; primary: string; onP
     <div className="space-y-5">
       <div className="grid gap-5 md:grid-cols-2">
         <div className={csv ? 'pointer-events-none opacity-40' : ''}>
-          <span className="label">Classes, sections & groups {csv && '(CSV is used instead)'}</span>
-          <div className="max-h-72 overflow-y-auto rounded-lg border border-slate-200 p-2">
-            {tree?.map((g) => (
-              <div key={g.id}>
-                <label className="flex items-center gap-2 rounded px-1 py-1 text-sm hover:bg-slate-50">
-                  <input type="checkbox" checked={ids.includes(g.id)} onChange={() => toggle(g)} />
-                  <span className="font-medium">{g.name}</span><span className="text-xs text-slate-400">{g.total}</span>
-                  {g.source === 'manual' && <Badge>my group</Badge>}
-                </label>
-                {g.children.length > 0 && (
-                  <div className="ml-6 flex flex-wrap gap-x-3">
-                    {g.children.map((s) => (
-                      <label key={s.id} className="flex items-center gap-1.5 py-0.5 text-xs text-slate-600">
-                        <input type="checkbox" checked={ids.includes(g.id) || ids.includes(s.id)} onChange={() => toggle(s)} />{s.name}
-                      </label>
-                    ))}
-                  </div>
-                )}
-              </div>
-            ))}
-            {!tree?.length && <p className="p-2 text-sm text-slate-500">No groups yet — sync from Frappe on the Contacts page.</p>}
-          </div>
+          <span className="label">Contact lists, classes & sections {csv && '(CSV is used instead)'}</span>
+          <ListPicker tree={tree ?? []} ids={ids} onChange={setIds} />
+          <p className="mt-1.5 text-xs text-slate-500">Pick any mix of your own lists and school classes or sections. A person in several lists gets the message once.</p>
         </div>
         <div>
           <span className="label">…or upload a CSV (marks, fee dues, custom lists)</span>
@@ -191,7 +155,7 @@ function Audience({ c, primary, onPatch, onCsv }: { c: any; primary: string; onP
         </div>
       </div>
 
-      {(ids.length > 0 || csv?.keyType === 'admission') && (
+      {(schoolPicked || csv?.keyType === 'admission') && (
         <div className="grid gap-4 md:grid-cols-2">
           <Field label="Send to" hint={c.recipient_mode === 'primary' ? `Primary = ${primary}, falling back to the other parent if missing. Change in Settings.` : undefined}>
             <select className="input" value={c.recipient_mode} onChange={(e) => onPatch({ recipient_mode: e.target.value }, true)}>
@@ -217,50 +181,132 @@ function Audience({ c, primary, onPatch, onCsv }: { c: any; primary: string; onP
   );
 }
 
+/** Ticking a class covers all its sections; ticking every section of a class stores the class instead. */
+function normaliseIds(ids: number[], tree: GroupNode[]): number[] {
+  let out = [...new Set(ids)];
+  for (const root of tree) {
+    const kids = root.children.map((c) => c.id);
+    if (!kids.length) continue;
+    if (out.includes(root.id)) out = out.filter((x) => !kids.includes(x));
+    else if (kids.every((k) => out.includes(k))) out = [...out.filter((x) => !kids.includes(x)), root.id];
+  }
+  return out;
+}
+
+function ListPicker({ tree, ids, onChange }: { tree: GroupNode[]; ids: number[]; onChange: (ids: number[]) => void }) {
+  const parentOf = new Map<number, GroupNode>();
+  for (const r of tree) for (const c of r.children) parentOf.set(c.id, r);
+  const byId = new Map<number, GroupNode>();
+  for (const r of tree) { byId.set(r.id, r); for (const c of r.children) byId.set(c.id, c); }
+  const roots = [...tree.filter((g) => g.source === 'manual'), ...tree.filter((g) => g.source !== 'manual')];
+  const options: MsOption[] = roots.flatMap((r) => {
+    const group = r.source === 'manual' ? 'My lists' : 'School — classes & sections';
+    return [
+      { value: String(r.id), label: r.name, group, hint: r.total ?? r.students + r.contacts },
+      ...r.children.map((c) => ({ value: String(c.id), label: c.name, group, indent: true, hint: c.students + c.contacts, search: `${r.name} ${c.name}` })),
+    ];
+  });
+  const checked = (id: number) => ids.includes(id) || (parentOf.has(id) && ids.includes(parentOf.get(id)!.id));
+  const toggle = (o: MsOption) => {
+    const id = Number(o.value);
+    const parent = parentOf.get(id);
+    if (!checked(id)) return onChange([...ids, id]);
+    if (parent && ids.includes(parent.id)) {
+      // Unticking one section of a fully selected class → keep its other sections
+      return onChange([...ids.filter((x) => x !== parent.id), ...parent.children.map((c) => c.id).filter((x) => x !== id)]);
+    }
+    onChange(ids.filter((x) => x !== id));
+  };
+  const bulk = (shown: MsOption[], on: boolean) => {
+    const shownIds = shown.map((o) => Number(o.value));
+    if (on) return onChange([...ids, ...shownIds]);
+    let next = [...ids];
+    for (const id of shownIds) {
+      const parent = parentOf.get(id);
+      if (parent && next.includes(parent.id)) next = [...next.filter((x) => x !== parent.id), ...parent.children.map((c) => c.id)];
+    }
+    onChange(next.filter((x) => !shownIds.includes(x)));
+  };
+  const chips = ids.filter((id) => byId.has(id)).map((id) => {
+    const p = parentOf.get(id);
+    return { value: String(id), label: p ? `${p.name} › ${byId.get(id)!.name}` : byId.get(id)!.name };
+  });
+  return (
+    <MultiSelect options={options} isChecked={(o) => checked(Number(o.value))} onToggle={toggle} onBulk={bulk}
+      chips={chips} onRemoveChip={(v) => onChange(ids.filter((x) => x !== Number(v)))}
+      placeholder="Choose lists, classes or sections…" emptyText={<>No lists yet — create one on the <Link to="/contacts" className="underline">Contacts</Link> page.</>} />
+  );
+}
+
+interface WaTargetRow { chat_id: string; subject: string; participants: number | null; kind: 'group' | 'channel'; announce: boolean; role: string | null; source: string; refreshed_at: string }
+
 function WaGroupsPicker({ c, numbers, onChange }: { c: any; numbers: any[]; onChange: (g: any[]) => void }) {
   const toast = useToast();
   const working = numbers.filter((n) => n.status === 'WORKING');
   const [numberId, setNumberId] = useState<number | null>(null);
   const nid = numberId ?? working[0]?.id ?? null;
-  const { data: groups, setData } = useLoad(() => (nid ? api.get<any[]>(`/numbers/${nid}/groups`) : Promise.resolve([])), [nid]);
-  const [q, setQ] = useState('');
-  const selected: any[] = c.audience.waGroups ?? [];
-  const isOn = (chatId: string) => selected.some((g) => g.chatId === chatId && g.numberId === nid);
-  const toggle = (g: any) => onChange(isOn(g.chat_id) ? selected.filter((x) => !(x.chatId === g.chat_id && x.numberId === nid)) : [...selected, { numberId: nid, chatId: g.chat_id, subject: g.subject }]);
-  const refresh = async () => { try { setData(await api.post(`/numbers/${nid}/groups/refresh`)); } catch (e) { toast((e as Error).message, 'error'); } };
-  const shown = (groups ?? []).filter((g) => g.subject?.toLowerCase().includes(q.toLowerCase()));
-  if (!working.length) return <Empty>No connected numbers. Connect a number first.</Empty>;
+  const { data: rows, setData, loading } = useLoad(() => (nid ? api.get<WaTargetRow[]>(`/numbers/${nid}/groups`) : Promise.resolve([])), [nid]);
+  const [busy, setBusy] = useState(false);
+  const [warning, setWarning] = useState<string | null>(null);
+  const selected: { numberId: number; chatId: string; subject: string }[] = c.audience.waGroups ?? [];
+  const mine = selected.filter((g) => g.numberId === nid);
+
+  const refresh = async () => {
+    setBusy(true); setWarning(null);
+    try {
+      const r = await api.post<{ items: WaTargetRow[]; warning: string | null }>(`/numbers/${nid}/groups/refresh`);
+      setData(r.items); setWarning(r.warning);
+      toast(`${r.items.filter((x) => x.kind === 'group').length} groups and ${r.items.filter((x) => x.kind === 'channel').length} channels loaded`);
+    } catch (e) { toast((e as Error).message, 'error'); } finally { setBusy(false); }
+  };
+
+  if (!working.length) return <Empty>No connected numbers. Connect a number on the <Link to="/numbers" className="underline">Numbers</Link> page first.</Empty>;
+  const list = rows ?? [];
+  const groupsN = list.filter((g) => g.kind === 'group').length, channelsN = list.length - groupsN;
+  const options: MsOption[] = list.map((g) => ({
+    value: g.chat_id, label: g.subject,
+    group: g.kind === 'channel' ? 'Channels you manage' : 'Groups',
+    hint: g.participants ? `${g.participants} ${g.kind === 'channel' ? 'followers' : 'members'}` : undefined,
+    badge: g.kind === 'channel' ? <Badge tone="violet">channel</Badge> : g.announce ? <Badge tone="amber">admins only</Badge> : undefined,
+  }));
+  const subjectOf = (chatId: string) => list.find((g) => g.chat_id === chatId)?.subject ?? chatId;
+  const others = selected.filter((g) => g.numberId !== nid);
+
   return (
-    <div className="grid gap-4 md:grid-cols-2">
-      <div>
-        <div className="mb-2 flex gap-2">
-          <select className="input" value={nid ?? ''} onChange={(e) => setNumberId(Number(e.target.value))}>
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-end gap-2">
+        <Field label="Post from number">
+          <select className="input w-60" value={nid ?? ''} onChange={(e) => { setNumberId(Number(e.target.value)); setWarning(null); }}>
             {working.map((n) => <option key={n.id} value={n.id}>{n.label}</option>)}
           </select>
-          <button className="btn-secondary whitespace-nowrap" onClick={refresh}>Refresh groups</button>
-        </div>
-        <input className="input mb-2" placeholder="Search groups" value={q} onChange={(e) => setQ(e.target.value)} />
-        <div className="max-h-72 overflow-y-auto rounded-lg border border-slate-200 p-2">
-          {shown.map((g) => (
-            <label key={g.chat_id} className="flex items-center gap-2 rounded px-1 py-1 text-sm hover:bg-slate-50">
-              <input type="checkbox" checked={isOn(g.chat_id)} onChange={() => toggle(g)} />{g.subject}<span className="text-xs text-slate-400">{g.participants ?? ''}</span>
-            </label>
-          ))}
-          {!shown.length && <p className="p-2 text-sm text-slate-500">No groups — click Refresh groups.</p>}
-        </div>
+        </Field>
+        <button className="btn-secondary" disabled={busy} onClick={refresh}>{busy ? 'Loading from WhatsApp… (up to 2 min)' : list.length ? '↻ Refresh from WhatsApp' : 'Load groups & channels'}</button>
+        {list.length > 0 && <span className="pb-2 text-xs text-slate-500">{groupsN} groups · {channelsN} channels · updated {fmtDate(list[0].refreshed_at)}</span>}
       </div>
-      <div>
-        <span className="label">Selected ({selected.length})</span>
-        <ul className="space-y-1 text-sm">
-          {selected.map((g) => (
-            <li key={g.numberId + g.chatId} className="flex items-center justify-between rounded bg-slate-50 px-2 py-1">
-              <span>{g.subject} <span className="text-xs text-slate-500">via {numbers.find((n) => n.id === g.numberId)?.label}</span></span>
-              <button className="text-xs text-red-600" onClick={() => onChange(selected.filter((x) => x !== g))}>✕</button>
-            </li>
-          ))}
-        </ul>
-        <p className="mt-2 text-xs text-slate-500">Each group is posted from the number you picked it under (it must be a member). Variable available: <code>{'{{group_name}}'}</code>.</p>
-      </div>
+      {(warning || list.some((g) => g.source === 'chats')) && (
+        <div className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800">{warning ?? 'Showing groups from recent chats only — the full list could not be loaded last time.'}</div>
+      )}
+      <MultiSelect options={options} loading={loading}
+        isChecked={(o) => mine.some((g) => g.chatId === o.value)}
+        onToggle={(o) => onChange(mine.some((g) => g.chatId === o.value)
+          ? selected.filter((g) => !(g.numberId === nid && g.chatId === o.value))
+          : [...selected, { numberId: nid!, chatId: o.value, subject: o.label }])}
+        onBulk={(shown, on) => {
+          const vals = new Set(shown.map((o) => o.value));
+          onChange(on
+            ? [...selected, ...shown.filter((o) => !mine.some((g) => g.chatId === o.value)).map((o) => ({ numberId: nid!, chatId: o.value, subject: o.label }))]
+            : selected.filter((g) => !(g.numberId === nid && vals.has(g.chatId))));
+        }}
+        chips={mine.map((g) => ({ value: g.chatId, label: g.chatId.endsWith('@newsletter') ? `📢 ${g.subject ?? subjectOf(g.chatId)}` : g.subject ?? subjectOf(g.chatId) }))}
+        onRemoveChip={(v) => onChange(selected.filter((g) => !(g.numberId === nid && g.chatId === v)))}
+        placeholder={list.length ? 'Choose groups or channels…' : 'Click “Load groups & channels” first'}
+        emptyText="No groups loaded yet." />
+      {others.length > 0 && (
+        <p className="text-xs text-slate-500">Also selected from other numbers: {others.map((g) => `${g.subject} (via ${numbers.find((n) => n.id === g.numberId)?.label ?? '?'})`).join(', ')}</p>
+      )}
+      <p className="text-xs text-slate-500">
+        <b>{selected.length}</b> selected. Each group or channel is posted to from the number it was picked under. In <Badge tone="amber">admins only</Badge> groups the number must be an admin. Variable: <code>{'{{group_name}}'}</code>.
+      </p>
     </div>
   );
 }

@@ -32,4 +32,6 @@ export class NumbersController {
 
   @Get(':id/groups') groups(@Param('id', ParseIntPipe) id: number) { return this.numbers.groups(id); }
   @Post(':id/groups/refresh') refreshGroups(@Param('id', ParseIntPipe) id: number) { return this.numbers.refreshGroups(id); }
+  /** Reads age / activity from WhatsApp; body.apply=true also saves them as the warm-up inputs. */
+  @Post(':id/detect') detect(@Param('id', ParseIntPipe) id: number, @Body() b: { apply?: boolean }) { return this.numbers.detect(id, !!b?.apply); }
 }

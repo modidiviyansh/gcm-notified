@@ -136,7 +136,8 @@ export class SenderService implements OnApplicationBootstrap, OnModuleDestroy {
         this.log.log(`[dry-run] ${n.label} → ${maskPhone(msg.phone) || msg.chat_id}: ${msg.body.slice(0, 60)}`);
         await this.finish(msg.id, 'sent', null, `dry-run-${msg.id}`);
       } else {
-        if (speed?.typing) {
+        // Channels have no typing indicator
+        if (speed?.typing && !msg.chat_id.endsWith('@newsletter')) {
           await this.waha.startTyping(n.session, msg.chat_id).catch(() => undefined);
           await sleep(typingMs(msg.body) + between(0, 600));
           await this.waha.stopTyping(n.session, msg.chat_id).catch(() => undefined);
