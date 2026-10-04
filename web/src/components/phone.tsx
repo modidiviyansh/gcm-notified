@@ -17,7 +17,11 @@ interface Ctx {
 }
 const PrivacyCtx = createContext<Ctx | null>(null);
 
-export const maskPhone = (p: string) => `•••••• ${p.replace(/\D/g, '').slice(-4)}`;
+/** Hidden form shaped like the shown one: +91 98000 01234 → +91 ••••• •1234 */
+export const maskPhone = (p: string) => {
+  const d = p.replace(/\D/g, '');
+  return d.startsWith('91') && d.length === 12 ? `+91 ••••• •${d.slice(-4)}` : `+${'•'.repeat(Math.max(d.length - 4, 2))}${d.slice(-4)}`;
+};
 
 export function PrivacyProvider({ children }: { children: ReactNode }) {
   const loc = useLocation();
@@ -88,25 +92,21 @@ export function Phone({ value, missing = '—', className = '' }: { value?: stri
   useEffect(() => (active && value ? p!.register(value) : undefined), [active, value, p?.register]);
   if (!value) return <span className={className}>{missing}</span>;
   if (!active) return <span className={`whitespace-nowrap ${className}`}>{fmtPhone(value)}</span>;
-  const btn = 'inline-grid h-5 w-5 place-items-center rounded text-slate-400 hover:bg-slate-100 hover:text-slate-700';
-  if (!p!.shown.has(value)) {
-    return (
-      <span className={`inline-flex items-center gap-1 whitespace-nowrap ${className}`}>
-        <span className="font-mono tracking-tight">{maskPhone(value)}</span>
-        <button type="button" className={btn} title="Show number" aria-label="Show number" onClick={() => p!.show([value])}><EyeIcon /></button>
-      </span>
-    );
-  }
+  const shown = p!.shown.has(value);
+  const full = fmtPhone(value);
+  const btn = 'inline-grid h-5 w-5 shrink-0 place-items-center rounded text-slate-400 hover:bg-slate-100 hover:text-slate-700';
   const copy = async () => {
     try { await navigator.clipboard.writeText('+' + value); toast('Number copied'); } catch { toast('Copy failed — select the number instead', 'error'); }
   };
+  // Same font, a box as wide as the full number and fixed button slots, so nothing moves when toggling
   return (
     <span className={`inline-flex items-center gap-1 whitespace-nowrap ${className}`}>
-      <span className="font-medium text-slate-800">{fmtPhone(value)}</span>
-      <button type="button" className={btn} title="Copy" aria-label="Copy number" onClick={copy}>
+      <span className="inline-block tabular-nums" style={{ minWidth: `${full.length}ch` }}>{shown ? full : maskPhone(value)}</span>
+      <button type="button" className={btn} title={shown ? 'Hide number' : 'Show number'} aria-label={shown ? 'Hide number' : 'Show number'}
+        onClick={() => (shown ? p!.hide([value]) : p!.show([value]))}><EyeIcon off={shown} /></button>
+      <button type="button" className={`${btn} ${shown ? '' : 'invisible'}`} title="Copy" aria-label="Copy number" tabIndex={shown ? 0 : -1} onClick={copy}>
         <svg viewBox="0 0 20 20" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden><rect x="7" y="7" width="10" height="10" rx="2" /><path d="M13 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2" /></svg>
       </button>
-      <button type="button" className={btn} title="Hide number" aria-label="Hide number" onClick={() => p!.hide([value])}><EyeIcon off /></button>
     </span>
   );
 }
