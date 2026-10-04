@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, fmtDate, fmtDuration } from '../api';
 import { Badge, Card, Empty, ErrorNote, Field, Modal, MsOption, MultiSelect, PageHeader, statusLabel, Toggle, useLoad, useToast } from '../components/ui';
 import type { GroupNode } from './Contacts';
+import { describeRule, MessageType, RuleEditor, SCHOOL_LABEL, useLabels } from '../components/rules';
 
 const STUDENT_VARS = ['student_name', 'first_name', 'admission_no', 'class', 'section', 'parent_name', 'father_name', 'mother_name', 'relation', 'child_count'];
 const PRESET_LABEL = { urgent: 'Urgent', normal: 'Normal', safe: 'Safe' } as const;
@@ -39,14 +40,23 @@ export default function CampaignEditor() {
 
   const launch = async () => {
     if (!preview) return;
+    const overriding = preview.overrideOptOut && preview.optedOut > 0;
+    if (overriding && !confirm(`🚨 ${preview.optedOut} of these people replied STOP.\n\nThis is an emergency message type, so it WILL be sent to them too. This is logged in Activity.\n\nContinue?`)) return;
     if (!confirm(`Start sending to ${sendableOf(preview)} recipients now?`)) return;
     setBusy(true);
-    try { await api.post(`/campaigns/${id}/launch`); toast('Campaign started'); nav(`/campaigns/${id}`); } catch (e) { toast((e as Error).message, 'error'); } finally { setBusy(false); }
+    try { await api.post(`/campaigns/${id}/launch`, { confirmOptOutOverride: overriding }); toast('Campaign started'); nav(`/campaigns/${id}`); } catch (e) { toast((e as Error).message, 'error'); } finally { setBusy(false); }
+  };
+  const chooseType = async (key: string) => {
+    window.clearTimeout(saveTimer.current);
+    try { setData(await api.put(`/campaigns/${id}`, { message_type: key })); setPreview(null); } catch (e) { toast((e as Error).message, 'error'); }
   };
 
   if (error) return <ErrorNote error={error} />;
   if (!c || !settings) return <p className="text-sm text-slate-500">Loading…</p>;
   const isGroups = c.kind === 'wa_groups';
+  const types: MessageType[] = settings.messageTypes ?? [];
+  const type = types.find((t) => t.key === c.message_type) ?? null;
+  let step = 1;
 
   return (
     <>
@@ -54,20 +64,26 @@ export default function CampaignEditor() {
         actions={<button className="btn-ghost text-red-600" onClick={async () => { if (confirm('Delete this draft?')) { await api.del(`/campaigns/${id}`); nav('/campaigns'); } }}>Delete draft</button>} />
 
       <div className="space-y-5">
-        <Step n={1} title="Name">
+        <Step n={step++} title="Name">
           <input className="input max-w-md" value={c.name} onChange={(e) => patch({ name: e.target.value })} />
         </Step>
 
-        <Step n={2} title={isGroups ? 'Choose WhatsApp groups & channels' : 'Who receives it'}>
+        {!isGroups && (
+          <Step n={step++} title="What is this message?">
+            <TypePicker types={types} value={c.message_type} onChange={chooseType} />
+          </Step>
+        )}
+
+        <Step n={step++} title={isGroups ? 'Choose WhatsApp groups & channels' : 'Who receives it'}>
           {isGroups ? <WaGroupsPicker c={c} numbers={numbers ?? []} onChange={(waGroups) => patch({ audience: { waGroups } })} />
-            : <Audience c={c} primary={settings.primaryParent} onPatch={patch} onCsv={(info) => setData((o: any) => ({ ...o, audience: { ...o.audience, csv: info } }))} />}
+            : <Audience c={c} type={type} primary={settings.primaryParent} onPatch={patch} onCsv={(info) => setData((o: any) => ({ ...o, audience: { ...o.audience, csv: info } }))} />}
         </Step>
 
-        <Step n={3} title="Message">
+        <Step n={step++} title="Message">
           <MessageEditor c={c} onPatch={patch} isGroups={isGroups} />
         </Step>
 
-        <Step n={4} title="Sending">
+        <Step n={step++} title="Sending">
           {!isGroups && (
             <div className="mb-4">
               <span className="label">Send from</span>
@@ -90,7 +106,7 @@ export default function CampaignEditor() {
           <Speed c={c} presets={settings.speedPresets} onPatch={patch} quiet={settings.quietHours} />
         </Step>
 
-        <Step n={5} title="Review & launch">
+        <Step n={step++} title="Review & launch">
           <div className="flex flex-wrap gap-2">
             <button className="btn-secondary" onClick={loadPreview} disabled={busy}>{busy ? 'Checking…' : preview ? 'Refresh preview' : 'Preview messages'}</button>
             {preview && <TestSend id={c.id} numbers={(numbers ?? []).filter((n) => n.status === 'WORKING')} />}
@@ -103,7 +119,30 @@ export default function CampaignEditor() {
   );
 }
 
-const sendableOf = (p: any) => p.recipients - p.optedOut - (p.notAdmin?.length ?? 0);
+const sendableOf = (p: any) => p.recipients - (p.overrideOptOut ? 0 : p.optedOut) - (p.notAdmin?.length ?? 0);
+
+function TypePicker({ types, value, onChange }: { types: MessageType[]; value: string | null; onChange: (key: string) => void }) {
+  return (
+    <div>
+      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+        {types.map((t) => {
+          const on = t.key === value;
+          return (
+            <button key={t.key} onClick={() => !on && onChange(t.key)}
+              className={`rounded-lg border px-3 py-2.5 text-left ${on ? (t.overrideOptOut ? 'border-red-500 bg-red-50 ring-2 ring-red-100' : 'border-brand-600 bg-brand-50 ring-2 ring-brand-100') : 'border-slate-200 hover:bg-slate-50'}`}>
+              <div className="text-sm font-medium"><span className="mr-1.5">{t.icon}</span>{t.name}</div>
+              <div className="mt-0.5 text-xs text-slate-500">
+                {describeRule(t.rule)} · {SCHOOL_LABEL[t.school]} · {t.speed}{!t.quietHours ? ' · ignores quiet hours' : ''}
+              </div>
+              {t.overrideOptOut && <div className="mt-1 text-xs font-medium text-red-700">Also reaches people who replied STOP</div>}
+            </button>
+          );
+        })}
+      </div>
+      <p className="mt-2 text-xs text-slate-500">This sets who gets it on which number, the speed and quiet hours below — you can still change them for this campaign. Edit types in <Link to="/settings" className="underline">Settings</Link>.</p>
+    </div>
+  );
+}
 
 function Step({ n, title, children }: { n: number; title: string; children: ReactNode }) {
   return (
@@ -111,7 +150,7 @@ function Step({ n, title, children }: { n: number; title: string; children: Reac
   );
 }
 
-function Audience({ c, primary, onPatch, onCsv }: { c: any; primary: string; onPatch: (p: any, i?: boolean) => void; onCsv: (info: any) => void }) {
+function Audience({ c, type, primary, onPatch, onCsv }: { c: any; type: MessageType | null; primary: string; onPatch: (p: any, i?: boolean) => void; onCsv: (info: any) => void }) {
   const toast = useToast();
   const { data: tree } = useLoad(() => api.get<GroupNode[]>('/groups'), []);
   const [csvReport, setCsvReport] = useState<any>(null);
@@ -120,6 +159,8 @@ function Audience({ c, primary, onPatch, onCsv }: { c: any; primary: string; onP
 
   const setIds = (next: number[]) => onPatch({ audience: { groupIds: normaliseIds(next, tree ?? []) } }, true);
   const schoolPicked = ids.some((id) => (tree ?? []).some((g) => g.source === 'frappe' && (g.id === id || g.children.some((c) => c.id === id))));
+  const listsPicked = !csv && ids.some((id) => (tree ?? []).some((g) => g.source === 'manual' && (g.id === id || g.children.some((c) => c.id === id))));
+  const { all: labels } = useLabels();
   const upload = async (f?: File) => {
     if (!f) return;
     try { const r = await api.upload(`/campaigns/${c.id}/csv`, f); setCsvReport(r); onCsv(r); toast(`CSV: ${r.matched} of ${r.rows} rows matched`); } catch (e) { toast((e as Error).message, 'error'); }
@@ -157,6 +198,15 @@ function Audience({ c, primary, onPatch, onCsv }: { c: any; primary: string; onP
         </div>
       </div>
 
+      {listsPicked && (
+        <div className="grid gap-4 md:grid-cols-2">
+          <Field label="Which number (your lists)" hint={c.number_rule ? 'Used for everyone in the chosen lists — list rules and personal exceptions are ignored for this campaign.' : 'Each person: their own exception → their list\'s rule → the message type default. Missing label → primary number.'}>
+            <RuleEditor value={c.number_rule} onChange={(r) => onPatch({ number_rule: r }, true)} labels={labels}
+              defaultLabel={`Follow list rules (default: ${describeRule(type?.rule)})`} />
+          </Field>
+        </div>
+      )}
+
       {(schoolPicked || csv?.keyType === 'admission') && (
         <div className="grid gap-4 md:grid-cols-2">
           <Field label="Send to" hint={c.recipient_mode === 'primary' ? `Primary = ${primary}, falling back to the other parent if missing. Change in Settings.` : undefined}>
@@ -165,6 +215,7 @@ function Audience({ c, primary, onPatch, onCsv }: { c: any; primary: string; onP
               <option value="father">Father</option>
               <option value="mother">Mother</option>
               <option value="both">Both parents</option>
+              <option value="all">Both parents + student</option>
               <option value="student">Student's own number</option>
             </select>
           </Field>
@@ -438,13 +489,20 @@ function Preview({ p }: { p: any }) {
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <div className="rounded-lg bg-slate-50 p-3"><div className="text-xs text-slate-500">Messages</div><div className="text-xl font-semibold">{sendable}</div>
           <div className="text-xs text-slate-500">{p.students ? `${p.students} students` : ''}{p.contacts ? ` ${p.contacts} contacts` : ''}</div></div>
-        <div className="rounded-lg bg-slate-50 p-3"><div className="text-xs text-slate-500">Skipped</div><div className="text-xl font-semibold">{p.optedOut + p.noNumber}</div>
-          <div className="text-xs text-slate-500">{p.optedOut} opted out · {p.noNumber} no number</div></div>
+        <div className="rounded-lg bg-slate-50 p-3"><div className="text-xs text-slate-500">Skipped</div><div className="text-xl font-semibold">{(p.overrideOptOut ? 0 : p.optedOut) + p.noNumber}</div>
+          <div className="text-xs text-slate-500">{p.overrideOptOut ? 0 : p.optedOut} opted out · {p.noNumber} no number</div></div>
         <div className="rounded-lg bg-slate-50 p-3"><div className="text-xs text-slate-500">Estimated time</div><div className="text-xl font-semibold">{fmtDuration(e.minutesToday)}</div>
           <div className="text-xs text-slate-500">{e.numbers} number{e.numbers > 1 ? 's' : ''} · ~{e.perNumberPerHour}/h each</div></div>
         <div className="rounded-lg bg-slate-50 p-3"><div className="text-xs text-slate-500">Ban risk</div><div className="mt-1"><Badge tone={riskTone}>{e.risk}</Badge></div>
           <div className="mt-1 text-xs text-slate-500">based on speed</div></div>
       </div>
+      {p.breakdown?.length > 0 && (
+        <div className="text-sm"><span className="text-slate-500">Sent to: </span>
+          {p.breakdown.map((b: any) => <span key={b.label + b.fallback} className="mr-1.5 inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-xs">
+            {b.label}{b.fallback && <span className="text-amber-700">(no match → primary)</span>} <b>{b.n}</b></span>)}
+        </div>
+      )}
+      {p.overrideOptOut && p.optedOut > 0 && <div className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">🚨 <b>{p.optedOut}</b> recipient{p.optedOut > 1 ? 's' : ''} replied STOP — this emergency message type sends to them anyway. You'll be asked to confirm, and it is logged.</div>}
       {e.overflow > 0 && <div className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800">Today's remaining capacity is {e.capToday}. The other <b>{e.overflow}</b> messages continue automatically tomorrow when daily caps reset — or add more numbers.</div>}
       {p.numbers.some((n: any) => n.status !== 'WORKING' || n.paused) && <div className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800">Some selected numbers are not connected or are paused — they won't send until they are back.</div>}
       {p.notAdmin?.length > 0 && <div className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">Not an admin in <b>{p.notAdmin.length}</b> admins-only group{p.notAdmin.length > 1 ? 's' : ''}/communit{p.notAdmin.length > 1 ? 'ies' : 'y'} — {p.notAdmin.slice(0, 5).join(', ')}{p.notAdmin.length > 5 ? '…' : ''}. These are skipped.</div>}

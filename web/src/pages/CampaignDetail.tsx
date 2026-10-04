@@ -69,7 +69,7 @@ export default function CampaignDetail() {
               <thead><tr><th>Recipient</th><th>Status</th><th>From</th><th>Sent</th><th>Message</th></tr></thead>
               <tbody>{msgs?.map((m) => (
                 <tr key={m.id}>
-                  <td><div>{m.recipient}</div><div className="text-xs text-slate-500">{m.phone ? <Phone value={m.phone} /> : /^\d+@(c\.us|s\.whatsapp\.net)$/.test(m.chat_id ?? '') ? <Phone value={m.chat_id.split('@')[0]} /> : m.chat_id}</div></td>
+                  <td><div>{m.recipient}{m.phone_label && <span className="ml-1.5 rounded bg-slate-100 px-1.5 py-px text-[11px] text-slate-600">{m.phone_label}</span>}</div><div className="text-xs text-slate-500">{m.phone ? <Phone value={m.phone} /> : /^\d+@(c\.us|s\.whatsapp\.net)$/.test(m.chat_id ?? '') ? <Phone value={m.chat_id.split('@')[0]} /> : m.chat_id}</div></td>
                   <td><Badge tone={statusTone(m.status)}>{m.status}</Badge>{m.error && <div className="mt-1 max-w-56 text-xs text-red-600">{m.error}</div>}</td>
                   <td className="text-xs">{m.number_label ?? '—'}</td>
                   <td className="whitespace-nowrap text-xs text-slate-500">{fmtDate(m.sent_at)}</td>

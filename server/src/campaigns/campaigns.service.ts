@@ -6,6 +6,8 @@ import { parseCsv } from '../contacts/contacts.controller';
 import { normalizePhone, toChatId } from '../common/phone';
 import { checkTemplate, contactRecipients, ContactRow, Recipient, RecipientMode, renderMessage, StudentRow, studentRecipients, varName } from './render';
 import { estimate } from './estimate';
+import { PeopleService } from '../contacts/people.service';
+import { cleanRule, describeRule, NumberRule } from '../contacts/rules';
 
 export interface Campaign {
   id: number; name: string; kind: 'contacts' | 'wa_groups'; status: string; body: string; media_id: number | null;
@@ -13,19 +15,20 @@ export interface Campaign {
   recipient_mode: RecipientMode; per_child: boolean; number_ids: number[];
   delay_min_ms: number; delay_max_ms: number; burst_min: number; burst_max: number; burst_pause_min_ms: number; burst_pause_max_ms: number;
   typing: boolean; respect_quiet_hours: boolean;
+  message_type: string | null; number_rule: NumberRule | null; override_opt_out: boolean;
   total: number; sent: number; delivered: number; read: number; failed: number; skipped: number;
   created_at: Date; started_at: Date | null; finished_at: Date | null;
 }
 interface CsvInfo { filename: string; keyColumn: string; keyType: 'admission' | 'phone'; nameColumn?: string | null; columns: string[]; variables: string[]; rows: number; matched: number; unmatched: number }
 
 const EDITABLE = ['name', 'body', 'media_id', 'recipient_mode', 'per_child', 'number_ids', 'delay_min_ms', 'delay_max_ms', 'burst_min', 'burst_max',
-  'burst_pause_min_ms', 'burst_pause_max_ms', 'typing', 'respect_quiet_hours', 'audience'] as const;
+  'burst_pause_min_ms', 'burst_pause_max_ms', 'typing', 'respect_quiet_hours', 'audience', 'message_type', 'number_rule'] as const;
 const SPEED_FIELDS = ['delay_min_ms', 'delay_max_ms', 'burst_min', 'burst_max', 'burst_pause_min_ms', 'burst_pause_max_ms', 'typing', 'respect_quiet_hours', 'number_ids'];
 const stripZeros = (s: string) => String(s ?? '').trim().replace(/^0+(?=\d)/, '');
 
 @Injectable()
 export class CampaignsService {
-  constructor(private readonly db: Db, private readonly settings: SettingsService, private readonly numbers: NumbersService) {}
+  constructor(private readonly db: Db, private readonly settings: SettingsService, private readonly numbers: NumbersService, private readonly people: PeopleService) {}
 
   list() {
     return this.db.query(`select id, name, kind, status, total, sent, delivered, read, failed, skipped, created_at, started_at, finished_at
@@ -57,13 +60,27 @@ export class CampaignsService {
        values ($1,$2,'primary',$3,$4,$5,$6,$7,$8) returning *`,
       [b.name?.trim() || 'Untitled campaign', kind, sp.delayMinMs, sp.delayMaxMs, sp.burstMin, sp.burstMax, sp.burstPauseMinMs, sp.burstPauseMaxMs],
     );
-    return row;
+    const first = s.messageTypes.find((t) => t.key === 'notice') ?? s.messageTypes[0];
+    return first ? this.update(row!.id, { message_type: first.key }) : row;
   }
 
   async update(id: number, b: Record<string, any>) {
     const c = await this.get(id);
     const allowed: readonly string[] = c.status === 'draft' ? EDITABLE : ['running', 'paused'].includes(c.status) ? SPEED_FIELDS : [];
     if (!allowed.length) throw new BadRequestException(`A ${c.status} campaign cannot be edited`);
+    // Choosing what the message is for fills in its recipients, speed, quiet hours and STOP handling
+    if (allowed.includes('message_type') && b.message_type !== undefined && b.message_type !== c.message_type) {
+      const s = await this.settings.get();
+      const t = s.messageTypes.find((x) => x.key === b.message_type);
+      if (!t) throw new BadRequestException('Unknown message type');
+      const sp = s.speedPresets[t.speed];
+      b = {
+        recipient_mode: t.school, respect_quiet_hours: t.quietHours, number_rule: null,
+        delay_min_ms: sp.delayMinMs, delay_max_ms: sp.delayMaxMs, burst_min: sp.burstMin, burst_max: sp.burstMax,
+        burst_pause_min_ms: sp.burstPauseMinMs, burst_pause_max_ms: sp.burstPauseMaxMs, ...b,
+      };
+      await this.db.query('update campaigns set override_opt_out=$2 where id=$1', [id, t.overrideOptOut]);
+    }
     const sets: string[] = [], vals: unknown[] = [id];
     for (const k of allowed) {
       if (b[k] === undefined) continue;
@@ -71,6 +88,8 @@ export class CampaignsService {
       if (k === 'body') checkTemplate(String(v));
       if (k === 'audience') v = { ...c.audience, ...v, csv: c.audience.csv ?? null }; // csv info is only changed via upload
       if (k === 'number_ids') v = (v as unknown[]).map(Number).filter(Number.isFinite);
+      if (k === 'number_rule') v = v === null ? null : JSON.stringify(cleanRule(v));
+      if (k === 'recipient_mode' && !['primary', 'father', 'mother', 'both', 'student', 'all'].includes(String(v))) continue;
       if (k.endsWith('_ms') || k.startsWith('burst_')) v = Math.max(0, Math.round(Number(v) || 0));
       vals.push(k === 'audience' ? JSON.stringify(v) : v);
       sets.push(`${k} = $${vals.length}`);
@@ -93,9 +112,10 @@ export class CampaignsService {
     const c = await this.get(id);
     const copy = await this.db.one<Campaign>(
       `insert into campaigns(name, kind, body, media_id, audience, recipient_mode, per_child, number_ids, delay_min_ms, delay_max_ms,
-         burst_min, burst_max, burst_pause_min_ms, burst_pause_max_ms, typing, respect_quiet_hours)
+         burst_min, burst_max, burst_pause_min_ms, burst_pause_max_ms, typing, respect_quiet_hours, message_type, number_rule, override_opt_out)
        select name || ' (copy)', kind, body, media_id, audience - 'csv', recipient_mode, per_child, number_ids, delay_min_ms, delay_max_ms,
-         burst_min, burst_max, burst_pause_min_ms, burst_pause_max_ms, typing, respect_quiet_hours from campaigns where id=$1 returning *`, [c.id]);
+         burst_min, burst_max, burst_pause_min_ms, burst_pause_max_ms, typing, respect_quiet_hours, message_type, number_rule, override_opt_out
+       from campaigns where id=$1 returning *`, [c.id]);
     return copy;
   }
 
@@ -149,7 +169,7 @@ export class CampaignsService {
   }
 
   // ---------- audience ----------
-  private async resolve(c: Campaign): Promise<{ recipients: Recipient[]; fixed?: { numberId: number }[]; noNumber: number; studentsCount: number; contactsCount: number }> {
+  private async resolve(c: Campaign): Promise<{ recipients: Recipient[]; fixed?: { numberId: number }[]; noNumber: number; studentsCount: number; contactsCount: number; breakdown?: { label: string; n: number; fallback?: boolean }[]; rule?: string }> {
     const s = await this.settings.get();
     if (c.kind === 'wa_groups') {
       const targets = c.audience.waGroups ?? [];
@@ -162,6 +182,8 @@ export class CampaignsService {
     const csv = c.audience.csv;
     let students: StudentRow[] = [];
     let contacts: ContactRow[] = [];
+    let people: Awaited<ReturnType<PeopleService['audience']>> | null = null;
+    const type = s.messageTypes.find((t) => t.key === c.message_type) ?? null;
     if (csv?.keyType === 'admission') {
       students = await this.db.query<StudentRow>(
         `select s.*, r.data as csv from campaign_rows r join students s on s.id = r.student_id where r.campaign_id=$1 and r.matched order by r.row_no`, [c.id]);
@@ -178,13 +200,23 @@ export class CampaignsService {
         students = await this.db.query<StudentRow>(
           `select s.* from students s join contact_groups g on g.id = s.group_id
            where s.active and (g.id = any($1) or g.parent_id = any($1)) order by s.program, s.section, s.student_name`, [ids]);
-        contacts = await this.db.query<ContactRow>(
-          `select c.* from contacts c join contact_groups g on g.id = c.group_id where g.id = any($1) or g.parent_id = any($1) order by c.id`, [ids]);
+        people = await this.people.audience(ids, c.message_type ?? '', c.number_rule, type?.rule ?? null);
+        contacts = people.contacts;
       }
     }
     const st = studentRecipients(students, c.recipient_mode, s.primaryParent, c.per_child);
-    const ct = contactRecipients(contacts).filter((r) => !st.recipients.some((x) => x.phone === r.phone));
-    return { recipients: [...st.recipients, ...ct], noNumber: st.noNumber.length, studentsCount: students.length, contactsCount: contacts.length };
+    const stPhones = new Set(st.recipients.map((x) => x.phone));
+    const ct = contactRecipients(contacts).filter((r) => !stPhones.has(r.phone));
+    // Which numbers were used: Father 612 · Mother 41 · Work 30 · Personal (fallback) 3
+    const tally = new Map<string, { label: string; n: number; fallback?: boolean }>();
+    for (const r of st.recipients) { const k = `${r.label}|false`; tally.set(k, { label: r.label ?? '', n: (tally.get(k)?.n ?? 0) + 1 }); }
+    for (const b of people?.breakdown ?? []) { const k = `${b.label}|${!!b.fallback}`; const t = tally.get(k); tally.set(k, t ? { ...t, n: t.n + b.n } : { ...b }); }
+    return {
+      recipients: [...st.recipients, ...ct], noNumber: st.noNumber.length + (people?.noNumber ?? 0),
+      studentsCount: students.length, contactsCount: people ? people.people : contacts.length,
+      breakdown: [...tally.values()].filter((t) => t.label).sort((a, b) => b.n - a.n),
+      rule: c.number_rule ? describeRule(c.number_rule) : undefined,
+    };
   }
 
   /** WhatsApp-group targets this campaign's numbers are not allowed to post into (admins-only groups / communities). */
@@ -212,16 +244,17 @@ export class CampaignsService {
     }));
     const numbers = (await this.numbers.list()).filter((n) =>
       c.kind === 'wa_groups' ? (c.audience.waGroups ?? []).some((g) => g.numberId === n.id) : c.number_ids.includes(n.id));
-    const est = estimate(r.recipients.length - optedOut, numbers.map((n) => ({ remaining: n.remaining_today })), c, c.body.length || 160);
+    const est = estimate(r.recipients.length - (c.override_opt_out ? 0 : optedOut), numbers.map((n) => ({ remaining: n.remaining_today })), c, c.body.length || 160);
     return {
-      recipients: r.recipients.length, optedOut, notAdmin, noNumber: r.noNumber, students: r.studentsCount, contacts: r.contactsCount,
+      recipients: r.recipients.length, optedOut, overrideOptOut: c.override_opt_out, breakdown: r.breakdown ?? [],
+      notAdmin, noNumber: r.noNumber, students: r.studentsCount, contacts: r.contactsCount,
       csv: c.audience.csv ?? null, samples, estimate: est,
       numbers: numbers.map((n) => ({ id: n.id, label: n.label, status: n.status, paused: n.paused, remaining_today: n.remaining_today })),
     };
   }
 
   // ---------- lifecycle ----------
-  async launch(id: number) {
+  async launch(id: number, confirmOptOutOverride = false) {
     const c = await this.get(id);
     if (c.status !== 'draft') throw new BadRequestException('Only draft campaigns can be launched');
     if (!c.body.trim() && !c.media_id) throw new BadRequestException('Add a message or an attachment');
@@ -234,13 +267,17 @@ export class CampaignsService {
     if (!r.recipients.length) throw new BadRequestException('This campaign has no recipients');
     const opted = new Set((await this.db.query<{ phone: string }>('select phone from opt_outs')).map((x) => x.phone));
     const blocked = await this.blockedTargets(c);
+    const optedIn = r.recipients.filter((x) => x.phone && opted.has(x.phone)).length;
+    if (c.override_opt_out && optedIn && !confirmOptOutOverride) {
+      throw new BadRequestException(`${optedIn} recipients replied STOP. Confirm that this emergency message should reach them too.`);
+    }
 
     await this.db.tx(async (tx) => {
       let i = 0;
       for (const rec of r.recipients) {
         const fixed = r.fixed?.[i]?.numberId ?? null;
         i++;
-        const isOpted = !!rec.phone && opted.has(rec.phone);
+        const isOpted = !!rec.phone && opted.has(rec.phone) && !c.override_opt_out;
         if (fixed !== null && blocked.has(`${fixed}:${rec.chatId}`)) {
           await tx.query(
             `insert into messages(campaign_id, number_id, fixed_number, chat_id, recipient, body, media_id, status, error) values ($1,$2,true,$3,$4,'',$5,'skipped',$6)`,
@@ -251,16 +288,19 @@ export class CampaignsService {
         // Space out several per-child messages to the same parent by 3 minutes each
         const notBefore = rec.childIndex > 0 ? new Date(Date.now() + rec.childIndex * 180_000) : null;
         await tx.query(
-          `insert into messages(campaign_id, number_id, fixed_number, chat_id, phone, recipient, body, media_id, status, error, not_before)
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+          `insert into messages(campaign_id, number_id, fixed_number, chat_id, phone, recipient, body, media_id, status, error, not_before, phone_label, ignore_opt_out)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
           [c.id, fixed, fixed !== null, rec.chatId, rec.phone || null, rec.display, body, c.media_id,
-           isOpted ? 'skipped' : 'queued', isOpted ? 'Opted out' : null, notBefore],
+           isOpted ? 'skipped' : 'queued', isOpted ? 'Opted out' : null, notBefore, rec.label ?? null, c.override_opt_out],
         );
       }
       await tx.query(`update campaigns set status='running', started_at=now() where id=$1`, [c.id]);
     });
     await this.refreshCounters(c.id);
     await this.db.event('campaign', `Campaign "${c.name}" launched (${r.recipients.length} recipients)`);
+    if (c.override_opt_out && optedIn) {
+      await this.db.event('campaign', `Emergency campaign "${c.name}" also sent to ${optedIn} people who had replied STOP`, 'warn');
+    }
     return this.detail(c.id);
   }
 
@@ -289,7 +329,7 @@ export class CampaignsService {
 
   messages(id: number, status?: string, q?: string, offset = 0) {
     return this.db.query(
-      `select m.id, m.recipient, m.phone, m.chat_id, m.status, m.error, m.attempts, m.sent_at, m.ack_at, n.label as number_label, left(m.body, 300) as body
+      `select m.id, m.recipient, m.phone, m.phone_label, m.chat_id, m.status, m.error, m.attempts, m.sent_at, m.ack_at, n.label as number_label, left(m.body, 300) as body
        from messages m left join wa_numbers n on n.id = m.number_id
        where m.campaign_id=$1 and ($2::text is null or m.status=$2) and ($3::text is null or m.recipient ilike '%'||$3||'%' or m.phone like '%'||$3||'%')
        order by m.id limit 200 offset $4`, [id, status || null, q || null, offset]);

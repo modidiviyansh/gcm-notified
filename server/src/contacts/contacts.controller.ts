@@ -4,33 +4,37 @@ import { parse } from 'csv-parse/sync';
 import { Db } from '../db/db.service';
 import { FrappeSyncService } from './frappe-sync.service';
 import { normalizePhone } from '../common/phone';
+import { detectNameColumn, detectPhoneColumns, NewPerson, parsePaste, PeopleService, PhoneColumn } from './people.service';
+import { cleanLabel, cleanRules, COMMON_LABELS, labelForColumn } from './rules';
 
 export function parseCsv(buf: Buffer): Record<string, string>[] {
   const text = buf.toString('utf8').replace(/^﻿/, '');
   return parse(text, { columns: (h: string[]) => h.map((x) => x.trim()), skip_empty_lines: true, trim: true, relax_column_count: true, bom: true });
 }
 
-const findCol = (cols: string[], re: RegExp) => cols.find((c) => re.test(c.toLowerCase().replace(/[\s_-]+/g, '')));
+// A person's numbers as JSON: [{phone, label, is_primary, opted_out}], primary first
+const PHONES_JSON = `coalesce((select json_agg(json_build_object('phone', pp.phone, 'label', pp.label, 'is_primary', pp.is_primary,
+  'opted_out', pp.phone in (select phone from opt_outs)) order by pp.is_primary desc, pp.id) from person_phones pp where pp.person_id = p.id), '[]')`;
 
 @Controller()
 export class ContactsController {
-  constructor(private readonly db: Db, private readonly sync: FrappeSyncService) {}
+  constructor(private readonly db: Db, private readonly sync: FrappeSyncService, private readonly people: PeopleService) {}
 
   // ---------- groups ----------
   @Get('groups')
   async tree() {
     const rows = await this.db.query(`
-      select g.id, g.parent_id, g.name, g.source, g.sort_order, g.description, g.created_at,
+      select g.id, g.parent_id, g.name, g.source, g.sort_order, g.description, g.created_at, g.rules,
         (select count(*)::int from students s where s.group_id = g.id and s.active) as students,
-        (select count(*)::int from contacts c where c.group_id = g.id) as contacts
+        (select count(*)::int from list_members m where m.group_id = g.id) as contacts
       from contact_groups g order by g.source, g.sort_order, g.name`);
     const byId = new Map<number, any>(rows.map((r) => [r.id, { ...r, children: [] }]));
     const roots: any[] = [];
     for (const g of byId.values()) (g.parent_id && byId.get(g.parent_id) ? byId.get(g.parent_id).children : roots).push(g);
     // A person in a list and one of its sublists counts once
     const people = new Map((await this.db.query<{ root: number; n: number }>(
-      `select coalesce(g.parent_id, g.id) as root, count(distinct c.phone)::int as n
-       from contacts c join contact_groups g on g.id = c.group_id group by 1`)).map((r) => [r.root, r.n]));
+      `select coalesce(g.parent_id, g.id) as root, count(distinct m.person_id)::int as n
+       from list_members m join contact_groups g on g.id = m.group_id group by 1`)).map((r) => [r.root, r.n]));
     for (const r of roots) {
       r.total = r.students + r.children.reduce((a: number, c: any) => a + c.students, 0) + (people.get(r.id) ?? 0);
     }
@@ -56,104 +60,121 @@ export class ContactsController {
       [g.id, b.name?.trim() || g.name, b.description === undefined ? g.description : b.description?.trim() || null]);
   }
 
-  /** Everyone in your own lists, one row per phone number, with the lists they are in. */
+  /** Number rules of a list: which label to use per message type. Sublists without a rule use their parent's. */
+  @Put('groups/:id/rules')
+  async setRules(@Param('id', ParseIntPipe) id: number, @Body() b: { rules: unknown }) {
+    await this.manualGroup(id);
+    return this.db.one('update contact_groups set rules=$2 where id=$1 returning id, rules', [id, JSON.stringify(cleanRules(b.rules))]);
+  }
+
+  @Get('labels')
+  async labels(@Query('groupId') groupId?: string) {
+    return { used: await this.people.labels(groupId ? Number(groupId) : undefined), common: COMMON_LABELS };
+  }
+
+  /** Everyone in your own lists, once per person, with their numbers and lists. */
   @Get('contacts')
   allContacts(@Query('q') q = '') {
     return this.db.query(
-      `select c.phone, max(c.name) as name, array_agg(distinct g.name order by g.name) as lists,
-              bool_or(c.phone in (select phone from opt_outs)) as opted_out, min(c.created_at) as created_at
-       from contacts c join contact_groups g on g.id = c.group_id
-       where ($1 = '' or c.name ilike $2 or ($3 <> '%%' and c.phone like $3))
-       group by c.phone order by max(c.name) nulls last, c.phone limit 2000`,
+      `select p.id, p.name, ${PHONES_JSON} as phones,
+              (select array_agg(distinct g.name order by g.name) from list_members m join contact_groups g on g.id = m.group_id where m.person_id = p.id) as lists,
+              p.created_at
+       from people p
+       where exists (select 1 from list_members m where m.person_id = p.id)
+         and ($1 = '' or p.name ilike $2 or ($3 <> '%%' and exists (select 1 from person_phones x where x.person_id = p.id and x.phone like $3)))
+       order by p.name nulls last, p.id limit 2000`,
       [q, `%${q}%`, `%${q.replace(/\D/g, '')}%`]);
   }
 
   @Delete('groups/:id')
   async deleteGroup(@Param('id', ParseIntPipe) id: number) {
     await this.manualGroup(id);
-    await this.db.query('delete from contact_groups where id=$1', [id]);
+    await this.db.tx(async (tx) => {
+      const ids = (await tx.query<{ person_id: number }>(
+        'select distinct person_id from list_members m join contact_groups g on g.id = m.group_id where g.id = $1 or g.parent_id = $1', [id])).rows.map((r) => r.person_id);
+      await tx.query('delete from contact_groups where id=$1', [id]);
+      await tx.query('delete from people p where p.id = any($1) and not exists (select 1 from list_members m where m.person_id = p.id)', [ids]);
+    });
     return { ok: true };
   }
 
   @Get('groups/:id/members')
   async members(@Param('id', ParseIntPipe) id: number, @Query('q') q = '') {
     const like = `%${q}%`;
+    const digits = `%${q.replace(/\D/g, '')}%`;
     const students = await this.db.query(
       `select s.id, s.admission_no, s.student_name, s.program, s.section, s.father_name, s.mother_name, s.father_phone, s.mother_phone,
               (s.father_phone in (select phone from opt_outs)) as father_opted_out, (s.mother_phone in (select phone from opt_outs)) as mother_opted_out
        from students s join contact_groups g on g.id = s.group_id
-       where s.active and (g.id = $1 or g.parent_id = $1) and ($2 = '' or s.student_name ilike $3 or s.admission_no ilike $3)
-       order by s.section, s.student_name limit 2000`, [id, q, like]);
-    // List + its sublists, once per phone (the list's own entry wins over a sublist's)
+       where s.active and (g.id = $1 or g.parent_id = $1)
+         and ($2 = '' or s.student_name ilike $3 or s.admission_no ilike $3 or ($4 <> '%%' and (s.father_phone like $4 or s.mother_phone like $4)))
+       order by s.section, s.student_name limit 2000`, [id, q, like, digits]);
+    // List + its sublists, once per person (the list's own membership wins over a sublist's)
     const contacts = await this.db.query(
       `select * from (
-         select distinct on (c.phone) c.id, c.name, c.phone, c.extra, (c.phone in (select phone from opt_outs)) as opted_out
-         from contacts c join contact_groups g on g.id = c.group_id
-         where (g.id = $1 or g.parent_id = $1) and ($2 = '' or c.name ilike $3 or c.phone ilike $3)
-         order by c.phone, (g.id = $1) desc, c.id
-       ) x order by name nulls last, phone limit 2000`, [id, q, like]);
+         select distinct on (p.id) p.id, p.name, p.rules, m.group_id, m.extra, ${PHONES_JSON} as phones
+         from list_members m join people p on p.id = m.person_id join contact_groups g on g.id = m.group_id
+         where (g.id = $1 or g.parent_id = $1)
+           and ($2 = '' or p.name ilike $3 or ($4 <> '%%' and exists (select 1 from person_phones x where x.person_id = p.id and x.phone like $4)))
+         order by p.id, (g.id = $1) desc
+       ) x order by name nulls last, id limit 2000`, [id, q, like, digits]);
     return { students, contacts };
   }
 
-  // ---------- manual contacts ----------
+  // ---------- people in your own lists ----------
   @Post('groups/:id/contacts')
-  async addContacts(@Param('id', ParseIntPipe) id: number, @Body() b: { text?: string; contacts?: { name?: string; phone: string }[] }) {
+  async addContacts(@Param('id', ParseIntPipe) id: number, @Body() b: { text?: string; people?: NewPerson[] }) {
     await this.manualGroup(id);
-    let list = b.contacts ?? [];
-    if (b.text) {
-      // One per line: "Name, 98765 43210", "98765 43210 Name" or just numbers (also comma/semicolon separated numbers)
-      list = b.text.split(/\r?\n/).flatMap((line) => {
-        const t = line.trim();
-        if (/[a-z]/i.test(t)) {
-          const m = /^(.*?)[\s,;\t]*(\+?\d[\d\s-]{7,}\d)[\s,;\t]*(.*)$/.exec(t);
-          const name = m && [m[1], m[3]].map((x) => x.replace(/^[\s,;:-]+|[\s,;:-]+$/g, '')).filter(Boolean).join(' ');
-          if (m && name && /[a-z]/i.test(name)) return [{ name, phone: m[2] }];
-        }
-        return t.split(/[,;\t]/).map((p) => ({ phone: p.trim() })).filter((p) => p.phone);
-      });
-    }
-    return this.insertContacts(id, list.map((c) => ({ name: c.name ?? null, phone: c.phone, extra: {} })));
+    return this.people.addToList(id, b.text ? parsePaste(b.text) : (b.people ?? []));
   }
 
+  /** Step 1 of a CSV import: columns, first rows and the suggested name / phone columns. */
+  @Post('groups/:id/import/preview')
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 5 * 1024 * 1024 } }))
+  async importPreview(@Param('id', ParseIntPipe) id: number, @UploadedFile() file: Express.Multer.File) {
+    await this.manualGroup(id);
+    const rows = this.csvRows(file);
+    const columns = Object.keys(rows[0]);
+    return { rows: rows.length, columns, sample: rows.slice(0, 5), nameColumn: detectNameColumn(columns), phoneColumns: detectPhoneColumns(rows) };
+  }
+
+  /** Step 2: import with the chosen mapping (or the suggested one when none is sent). */
   @Post('groups/:id/import')
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 5 * 1024 * 1024 } }))
-  async importCsv(@Param('id', ParseIntPipe) id: number, @UploadedFile() file: Express.Multer.File) {
+  async importCsv(@Param('id', ParseIntPipe) id: number, @UploadedFile() file: Express.Multer.File, @Body('mapping') mappingJson?: string) {
     await this.manualGroup(id);
+    const rows = this.csvRows(file);
+    const columns = Object.keys(rows[0]);
+    let nameColumn = detectNameColumn(columns);
+    let phoneColumns = detectPhoneColumns(rows);
+    if (mappingJson) {
+      let m: { nameColumn?: string | null; phoneColumns?: PhoneColumn[] };
+      try { m = JSON.parse(mappingJson); } catch { throw new BadRequestException('Invalid column mapping'); }
+      nameColumn = m.nameColumn && columns.includes(m.nameColumn) ? m.nameColumn : null;
+      phoneColumns = (m.phoneColumns ?? []).filter((p) => columns.includes(p.column))
+        .map((p) => ({ column: p.column, label: cleanLabel(p.label) || labelForColumn(p.column) }));
+    }
+    if (!phoneColumns.length) throw new BadRequestException(`No phone column chosen. Columns: ${columns.join(', ')}`);
+    const r = await this.people.addToList(id, this.people.rowsToPeople(rows, nameColumn, phoneColumns));
+    return { ...r, nameColumn, phoneColumns };
+  }
+
+  private csvRows(file?: Express.Multer.File) {
     if (!file) throw new BadRequestException('CSV file is required');
     const rows = parseCsv(file.buffer);
     if (!rows.length) throw new BadRequestException('CSV is empty');
-    const cols = Object.keys(rows[0]);
-    const phoneCol = findCol(cols, /^(phone|mobile|number|whatsapp|contact|mobileno|phoneno)/);
-    const nameCol = findCol(cols, /^(name|fullname|contactname|parentname)/);
-    if (!phoneCol) throw new BadRequestException(`No phone column found. Columns: ${cols.join(', ')}`);
-    const list = rows.map((r) => {
-      const extra: Record<string, string> = {};
-      for (const c of cols) if (c !== phoneCol && c !== nameCol) extra[c] = r[c];
-      return { name: nameCol ? r[nameCol] : null, phone: r[phoneCol], extra };
-    });
-    return { ...(await this.insertContacts(id, list)), phoneColumn: phoneCol, nameColumn: nameCol ?? null };
+    return rows;
   }
 
-  @Delete('contacts/:id')
-  async deleteContact(@Param('id', ParseIntPipe) id: number) {
-    await this.db.query('delete from contacts where id=$1', [id]);
+  @Delete('groups/:id/members/:personId')
+  async removeMember(@Param('id', ParseIntPipe) id: number, @Param('personId', ParseIntPipe) personId: number) {
+    await this.manualGroup(id);
+    await this.people.removeFromList(id, personId);
     return { ok: true };
   }
 
-  private async insertContacts(groupId: number, list: { name: string | null; phone: string; extra: Record<string, string> }[]) {
-    let added = 0, updated = 0;
-    const invalid: string[] = [];
-    for (const c of list) {
-      const phone = normalizePhone(c.phone);
-      if (!phone) { invalid.push(String(c.phone)); continue; }
-      const r = await this.db.one<{ inserted: boolean }>(
-        `insert into contacts(group_id, name, phone, extra) values ($1,$2,$3,$4)
-         on conflict (group_id, phone) do update set name=coalesce(excluded.name, contacts.name), extra=contacts.extra || excluded.extra
-         returning (xmax = 0) as inserted`, [groupId, c.name?.trim() || null, phone, c.extra]);
-      r?.inserted ? added++ : updated++;
-    }
-    return { added, updated, invalid: invalid.length, invalidSamples: invalid.slice(0, 10) };
-  }
+  @Get('people/:id') person(@Param('id', ParseIntPipe) id: number) { return this.people.person(id); }
+  @Put('people/:id') updatePerson(@Param('id', ParseIntPipe) id: number, @Body() b: any) { return this.people.updatePerson(id, b); }
 
   private async manualGroup(id: number) {
     const g = await this.db.one('select * from contact_groups where id=$1', [id]);

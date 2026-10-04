@@ -2,14 +2,14 @@ import Handlebars from 'handlebars';
 import { spin } from '../common/random';
 import { toChatId } from '../common/phone';
 
-export type RecipientMode = 'father' | 'mother' | 'both' | 'primary' | 'student';
+export type RecipientMode = 'father' | 'mother' | 'both' | 'primary' | 'student' | 'all';
 
 export interface StudentRow {
   id: number; admission_no: string; student_name: string; program: string | null; section: string | null;
   father_name: string | null; mother_name: string | null; father_phone: string | null; mother_phone: string | null; student_phone: string | null;
   csv?: Record<string, string> | null;
 }
-export interface ContactRow { id: number; name: string | null; phone: string; extra?: Record<string, string> | null; csv?: Record<string, string> | null }
+export interface ContactRow { id: number; name: string | null; phone: string; label?: string | null; extra?: Record<string, string> | null; csv?: Record<string, string> | null }
 
 export interface Recipient {
   phone: string;
@@ -18,6 +18,8 @@ export interface Recipient {
   vars: Record<string, unknown>;
   /** when per-child, which child this message is for (0-based) – used to space messages to the same phone */
   childIndex: number;
+  /** which of the person's numbers this is: Father, Mother, Work, Mobile… */
+  label?: string | null;
 }
 
 /** CSV header → variable name: "Max Marks" → max_marks */
@@ -62,9 +64,11 @@ export function phonesFor(s: StudentRow, mode: RecipientMode, primary: 'father' 
     case 'father': return f ? [f] : [];
     case 'mother': return m ? [m] : [];
     case 'student': return s.student_phone ? [{ phone: s.student_phone, relation: 'Student' }] : [];
-    case 'both': {
-      const out = [f, m].filter(Boolean) as { phone: string; relation: 'Father' | 'Mother' }[];
-      return out.length === 2 && out[0].phone === out[1].phone ? [out[0]] : out;
+    case 'both':
+    case 'all': {
+      const st = mode === 'all' && s.student_phone ? { phone: s.student_phone, relation: 'Student' as const } : null;
+      const out = [f, m, st].filter(Boolean) as { phone: string; relation: 'Father' | 'Mother' | 'Student' }[];
+      return out.filter((x, i) => out.findIndex((y) => y.phone === x.phone) === i);
     }
     case 'primary':
     default: {
@@ -98,7 +102,7 @@ export function studentRecipients(students: StudentRow[], mode: RecipientMode, p
     if (perChild) {
       children.forEach((c, i) => recipients.push({
         phone, chatId: toChatId(phone), display: `${h.relation === 'Student' ? '' : 'Parent of '}${c.student_name}`.trim(),
-        vars: { ...c, children: [c], child_count: 1 }, childIndex: i,
+        vars: { ...c, children: [c], child_count: 1 }, childIndex: i, label: h.relation,
       }));
     } else {
       const first = children[0];
@@ -115,7 +119,7 @@ export function studentRecipients(students: StudentRow[], mode: RecipientMode, p
           children,
           child_count: children.length,
         },
-        childIndex: 0,
+        childIndex: 0, label: h.relation,
       });
     }
   }
@@ -126,8 +130,8 @@ export function contactRecipients(contacts: ContactRow[]): Recipient[] {
   const byPhone = new Map<string, Recipient>();
   for (const c of contacts) {
     if (byPhone.has(c.phone)) continue;
-    const vars = { name: c.name ?? '', phone: c.phone, ...csvVars(c.extra), ...csvVars(c.csv) };
-    byPhone.set(c.phone, { phone: c.phone, chatId: toChatId(c.phone), display: c.name || c.phone, vars: { ...vars, children: [], child_count: 0 }, childIndex: 0 });
+    const vars = { name: c.name ?? '', phone: c.phone, number_label: c.label ?? '', ...csvVars(c.extra), ...csvVars(c.csv) };
+    byPhone.set(c.phone, { phone: c.phone, chatId: toChatId(c.phone), display: c.name || 'Unnamed contact', vars: { ...vars, children: [], child_count: 0 }, childIndex: 0, label: c.label ?? null });
   }
   return [...byPhone.values()];
 }

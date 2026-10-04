@@ -1,11 +1,13 @@
 import { ReactNode, useEffect, useState } from 'react';
 import { api, fmtDate } from '../api';
 import { Phone, RevealAll } from '../components/phone';
+import { CsvImport, ListRulesModal, PersonModal, PhoneList } from '../components/people';
+import type { NumberRule } from '../components/rules';
 import { Badge, Card, Empty, ErrorNote, Field, Modal, PageHeader, useLoad, useToast } from '../components/ui';
 
 export interface GroupNode {
   id: number; parent_id: number | null; name: string; source: 'frappe' | 'manual'; description?: string | null; created_at?: string;
-  students: number; contacts: number; total?: number; children: GroupNode[];
+  students: number; contacts: number; total?: number; children: GroupNode[]; rules?: Record<string, NumberRule>;
 }
 
 type Tab = 'lists' | 'school' | 'optouts';
@@ -102,7 +104,7 @@ function Lists({ lists, reload }: { lists: GroupNode[]; reload: () => void }) {
         {sel && root && (
           <ListDetail key={sel.id} list={sel} root={root}
             onSelect={setSelId} onAdd={() => setAdding(sel)} onEdit={() => setEditing({ list: sel })}
-            onSub={() => setEditing({ parent: root })} onDelete={() => del(sel)} />
+            onSub={() => setEditing({ parent: root })} onDelete={() => del(sel)} onChanged={reload} />
         )}
       </div>
 
@@ -124,12 +126,20 @@ function ListItem({ name, count, hint, active, sub, onClick }: { name: string; c
   );
 }
 
-function ListDetail({ list, root, onSelect, onAdd, onEdit, onSub, onDelete }: {
-  list: GroupNode; root: GroupNode; onSelect: (id: number) => void; onAdd: () => void; onEdit: () => void; onSub: () => void; onDelete: () => void;
+function ListDetail({ list, root, onSelect, onAdd, onEdit, onSub, onDelete, onChanged }: {
+  list: GroupNode; root: GroupNode; onSelect: (id: number) => void; onAdd: () => void; onEdit: () => void; onSub: () => void; onDelete: () => void; onChanged: () => void;
 }) {
+  const toast = useToast();
   const [q, setQ] = useState('');
+  const [person, setPerson] = useState<number | null>(null);
+  const [rulesOpen, setRulesOpen] = useState(false);
   const { data, reload } = useLoad(() => api.get(`/groups/${list.id}/members?q=${encodeURIComponent(q)}`), [list.id, q, list.contacts, list.total]);
-  const remove = async (id: number) => { await api.del(`/contacts/${id}`); reload(); };
+  const remove = async (c: any) => {
+    const where = c.group_id === list.id ? list.name : root.children.find((x) => x.id === c.group_id)?.name ?? 'this list';
+    if (!confirm(`Remove ${c.name ?? 'this person'} from "${where}"? Other lists they are in are not affected.`)) return;
+    try { await api.del(`/groups/${c.group_id}/members/${c.id}`); reload(); onChanged(); } catch (e) { toast((e as Error).message, 'error'); }
+  };
+  const ruleCount = Object.keys(list.rules ?? {}).length;
   const contacts: any[] = data?.contacts ?? [];
   const extraCols = [...new Set(contacts.flatMap((c) => Object.keys(c.extra ?? {})))].slice(0, 4);
   const total = list.parent_id ? list.contacts : list.total ?? list.contacts;
@@ -143,6 +153,7 @@ function ListDetail({ list, root, onSelect, onAdd, onEdit, onSub, onDelete }: {
       actions={<>
         <button className="btn-primary" onClick={onAdd}>+ Add contacts</button>
         <button className="btn-secondary" onClick={onEdit}>Edit</button>
+        <button className="btn-secondary" onClick={() => setRulesOpen(true)} title="Which number each message type uses">Number rules{ruleCount ? ` (${ruleCount})` : ''}</button>
         {!list.parent_id && <button className="btn-secondary" onClick={onSub}>+ Sublist</button>}
         <button className="btn-ghost text-red-600" onClick={onDelete}>Delete</button>
       </>}>
@@ -156,13 +167,19 @@ function ListDetail({ list, root, onSelect, onAdd, onEdit, onSub, onDelete }: {
       {contacts.length > 0 ? (
         <div className="overflow-x-auto">
           <table className="table">
-            <thead><tr><th>Name</th><th>Phone</th>{extraCols.map((c) => <th key={c}>{c}</th>)}<th /></tr></thead>
+            <thead><tr><th>Name</th><th>Numbers</th>{extraCols.map((c) => <th key={c}>{c}</th>)}<th /></tr></thead>
             <tbody>{contacts.map((c) => (
               <tr key={c.id}>
-                <td>{c.name ?? <span className="text-slate-400">—</span>}</td>
-                <td className="whitespace-nowrap"><Phone value={c.phone} /> {c.opted_out && <Badge tone="amber">opted out</Badge>}</td>
+                <td>
+                  <button className="text-left hover:text-brand-700 hover:underline" onClick={() => setPerson(c.id)}>{c.name ?? <span className="text-slate-400">— no name</span>}</button>
+                  {Object.keys(c.rules ?? {}).length > 0 && <div><Badge tone="violet">own number rules</Badge></div>}
+                </td>
+                <td><PhoneList phones={c.phones} /></td>
                 {extraCols.map((k) => <td key={k} className="text-xs text-slate-600">{c.extra?.[k] ?? ''}</td>)}
-                <td className="text-right"><button className="text-xs text-red-600 hover:underline" onClick={() => remove(c.id)}>Remove</button></td>
+                <td className="whitespace-nowrap text-right">
+                  <button className="mr-3 text-xs text-brand-700 hover:underline" onClick={() => setPerson(c.id)}>Edit</button>
+                  <button className="text-xs text-red-600 hover:underline" onClick={() => remove(c)}>Remove</button>
+                </td>
               </tr>))}</tbody>
           </table>
           {contacts.length >= 2000 && <p className="mt-2 text-xs text-slate-500">Showing the first 2000 — search to narrow down.</p>}
@@ -170,6 +187,8 @@ function ListDetail({ list, root, onSelect, onAdd, onEdit, onSub, onDelete }: {
       ) : data && (
         <Empty>{q ? 'Nobody matches your search.' : <>This list is empty. <button className="text-brand-700 underline" onClick={onAdd}>Add contacts</button> by pasting numbers or importing a CSV.</>}</Empty>
       )}
+      {person !== null && <PersonModal id={person} onClose={() => setPerson(null)} onSaved={() => { setPerson(null); reload(); }} />}
+      {rulesOpen && <ListRulesModal group={list} parentRules={list.parent_id ? root.rules : null} onClose={() => setRulesOpen(false)} onSaved={() => { setRulesOpen(false); onChanged(); }} />}
     </Card>
   );
 }
@@ -180,23 +199,25 @@ function Chip({ active, onClick, children }: { active: boolean; onClick: () => v
 
 function AllContacts() {
   const [q, setQ] = useState('');
-  const { data } = useLoad(() => api.get<any[]>(`/contacts?q=${encodeURIComponent(q)}`), [q]);
+  const [person, setPerson] = useState<number | null>(null);
+  const { data, reload } = useLoad(() => api.get<any[]>(`/contacts?q=${encodeURIComponent(q)}`), [q]);
   return (
     <Card title={<span className="flex flex-col"><span className="text-base">All contacts</span><span className="text-xs font-normal text-slate-500">Everyone in your lists, once per number</span></span>}>
       <div className="mb-3 flex gap-2"><input className="input" placeholder="Search name or last digits of the number" value={q} onChange={(e) => setQ(e.target.value)} autoFocus /><RevealAll /></div>
       {!data?.length ? <Empty>{q ? 'Nobody matches your search.' : 'No contacts yet.'}</Empty> : (
         <div className="overflow-x-auto">
           <table className="table">
-            <thead><tr><th>Name</th><th>Phone</th><th>Lists</th></tr></thead>
+            <thead><tr><th>Name</th><th>Numbers</th><th>Lists</th></tr></thead>
             <tbody>{data.map((c) => (
-              <tr key={c.phone}>
-                <td>{c.name ?? <span className="text-slate-400">—</span>}</td>
-                <td className="whitespace-nowrap"><Phone value={c.phone} /> {c.opted_out && <Badge tone="amber">opted out</Badge>}</td>
+              <tr key={c.id}>
+                <td><button className="text-left hover:text-brand-700 hover:underline" onClick={() => setPerson(c.id)}>{c.name ?? <span className="text-slate-400">— no name</span>}</button></td>
+                <td><PhoneList phones={c.phones} /></td>
                 <td><div className="flex flex-wrap gap-1">{c.lists.map((l: string) => <Badge key={l}>{l}</Badge>)}</div></td>
               </tr>))}</tbody>
           </table>
         </div>
       )}
+      {person !== null && <PersonModal id={person} onClose={() => setPerson(null)} onSaved={() => { setPerson(null); reload(); }} />}
     </Card>
   );
 }
@@ -229,15 +250,10 @@ function AddContactsModal({ group, onClose, onDone }: { group: GroupNode; onClos
   const [mode, setMode] = useState<'paste' | 'csv'>('paste');
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
-  const report = (r: any) => toast(`Added ${r.added}, updated ${r.updated}${r.invalid ? `, ${r.invalid} invalid skipped` : ''}`, r.invalid ? 'error' : 'ok');
+  const report = (r: any) => toast(`Added ${r.added}, updated ${r.updated}${r.invalid ? `, ${r.invalid} invalid skipped` : ''}${r.conflicts ? `, ${r.conflicts} numbers already belong to someone else` : ''}`, r.invalid || r.conflicts ? 'error' : 'ok');
   const paste = async () => {
     setBusy(true);
     try { report(await api.post(`/groups/${group.id}/contacts`, { text })); onDone(); } catch (e) { toast((e as Error).message, 'error'); } finally { setBusy(false); }
-  };
-  const upload = async (f: File | undefined) => {
-    if (!f) return;
-    setBusy(true);
-    try { report(await api.upload(`/groups/${group.id}/import`, f)); onDone(); } catch (e) { toast((e as Error).message, 'error'); } finally { setBusy(false); }
   };
   const lines = text.split('\n').filter((l) => l.trim()).length;
   return (
@@ -248,26 +264,15 @@ function AddContactsModal({ group, onClose, onDone }: { group: GroupNode; onClos
       </div>
       {mode === 'paste' ? (
         <div>
-          <p className="mb-2 text-xs text-slate-500">One person per line — <code>Name, 98765 43210</code>, <code>98765 43210 Name</code> or just the number. Indian numbers work without +91.</p>
-          <textarea className="input h-56 font-mono text-xs" autoFocus value={text} onChange={(e) => setText(e.target.value)} placeholder={'Ramesh Kumar, 98765 43210\n+91 98111 22233 Sunita\n9876501234'} />
+          <p className="mb-2 text-xs text-slate-500">One person per line — <code>Name, 98765 43210</code>, <code>98765 43210 Name</code> or just the number. A second number on a named line is saved as <b>Mobile 2</b> for the same person (relabel it later, e.g. Work). Indian numbers work without +91.</p>
+          <textarea className="input h-56 font-mono text-xs" autoFocus value={text} onChange={(e) => setText(e.target.value)} placeholder={'Ramesh Kumar, 98765 43210, 98111 22200\n+91 98111 22233 Sunita\n9876501234'} />
           <div className="mt-2 flex items-center justify-between">
             <span className="text-xs text-slate-500">{lines} line{lines === 1 ? '' : 's'}</span>
             <button className="btn-primary" disabled={busy || !text.trim()} onClick={paste}>{busy ? 'Adding…' : 'Add to list'}</button>
           </div>
         </div>
       ) : (
-        <div>
-          <p className="mb-3 text-sm text-slate-600">First row = column names. Needs a <b>Phone</b> (or Mobile / WhatsApp) column; <b>Name</b> is optional. Every other column is saved with the contact and usable in messages — e.g. a <code>Route</code> column becomes <code>{'{{route}}'}</code>.</p>
-          <label className="block cursor-pointer rounded-lg border-2 border-dashed border-slate-300 p-8 text-center hover:border-brand-600 hover:bg-brand-50">
-            <span className="text-sm font-medium text-brand-800">{busy ? 'Importing…' : 'Choose a CSV file'}</span>
-            <span className="mt-1 block text-xs text-slate-500">From Excel / Google Sheets: File → Download → CSV</span>
-            <input type="file" accept=".csv,text/csv" className="hidden" disabled={busy} onChange={(e) => upload(e.target.files?.[0])} />
-          </label>
-          <button className="mt-2 text-xs text-brand-700 hover:underline" onClick={() => {
-            const blob = new Blob(['Name,Phone,Department\nRamesh Kumar,9876543210,Transport\n'], { type: 'text/csv' });
-            const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'contacts-template.csv'; a.click();
-          }}>Download a sample CSV</button>
-        </div>
+        <CsvImport groupId={group.id} onDone={(r) => { report(r); onDone(); }} />
       )}
     </Modal>
   );

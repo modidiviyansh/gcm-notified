@@ -11,6 +11,7 @@ import { NumbersService } from './numbers/numbers.service';
 import { NumbersController } from './numbers/numbers.controller';
 import { FrappeSyncService } from './contacts/frappe-sync.service';
 import { ContactsController } from './contacts/contacts.controller';
+import { PeopleService } from './contacts/people.service';
 import { MediaController } from './media/media.controller';
 import { CampaignsService } from './campaigns/campaigns.service';
 import { CampaignsController, TemplatesController } from './campaigns/campaigns.controller';
@@ -25,7 +26,7 @@ import { WebhooksController } from './webhooks/webhooks.controller';
   ],
   providers: [
     { provide: APP_GUARD, useClass: AuthGuard },
-    Db, WahaClient, SettingsService, AlertsService, NumbersService, FrappeSyncService, CampaignsService, SenderService,
+    Db, WahaClient, SettingsService, AlertsService, NumbersService, FrappeSyncService, PeopleService, CampaignsService, SenderService,
   ],
 })
 export class AppModule {}

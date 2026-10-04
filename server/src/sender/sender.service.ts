@@ -16,7 +16,7 @@ import { maskPhone } from '../common/phone';
 
 interface MessageRow {
   id: number; campaign_id: number | null; number_id: number; chat_id: string; phone: string | null; body: string;
-  media_id: number | null; attempts: number; recipient: string | null;
+  media_id: number | null; attempts: number; recipient: string | null; ignore_opt_out: boolean;
 }
 interface Speed {
   delay_min_ms: number; delay_max_ms: number; burst_min: number; burst_max: number;
@@ -120,7 +120,7 @@ export class SenderService implements OnApplicationBootstrap, OnModuleDestroy {
     if (msg.campaign_id) this.dirtyCampaigns.add(msg.campaign_id);
 
     // Opt-out (checked again at send time — someone may have replied STOP since launch)
-    if (msg.phone && (await this.db.one('select 1 from opt_outs where phone=$1', [msg.phone]))) {
+    if (msg.phone && !msg.ignore_opt_out && (await this.db.one('select 1 from opt_outs where phone=$1', [msg.phone]))) {
       await this.finish(msg.id, 'skipped', 'Opted out');
       return 200;
     }

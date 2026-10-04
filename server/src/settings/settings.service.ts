@@ -1,7 +1,19 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { Db } from '../db/db.service';
+import type { RecipientMode } from '../campaigns/render';
+import { cleanRule, NumberRule, PRIMARY_RULE } from '../contacts/rules';
 
 export interface SpeedPreset { delayMinMs: number; delayMaxMs: number; burstMin: number; burstMax: number; burstPauseMinMs: number; burstPauseMaxMs: number }
+
+/** What a message is for. Decides which number(s) are used, speed, quiet hours and whether STOP is overridden. */
+export interface MessageType {
+  key: string; name: string; icon: string;
+  rule: NumberRule;                 // own lists: default number rule (lists and people can override)
+  school: RecipientMode;            // school (Frappe) students: which parent(s)
+  speed: 'urgent' | 'normal' | 'safe';
+  quietHours: boolean;              // respect quiet hours
+  overrideOptOut: boolean;          // also send to people who replied STOP (emergencies only)
+}
 
 export interface AppSettings {
   quietHours: { enabled: boolean; start: string; end: string };
@@ -14,6 +26,7 @@ export interface AppSettings {
   frappe: { academicYear: string; excludePrograms: string[]; syncEveryHours: number };
   autoPause: { failureRatePct: number; minSamples: number };
   privacy: { maskPhones: boolean; rehideSeconds: number };
+  messageTypes: MessageType[];
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -31,7 +44,39 @@ export const DEFAULT_SETTINGS: AppSettings = {
   frappe: { academicYear: '', excludePrograms: ['Dummy', 'Dummy class'], syncEveryHours: 6 },
   autoPause: { failureRatePct: 5, minSamples: 20 },
   privacy: { maskPhones: true, rehideSeconds: 30 },
+  messageTypes: [
+    { key: 'notice', name: 'Notice', icon: '📢', rule: PRIMARY_RULE, school: 'primary', speed: 'normal', quietHours: true, overrideOptOut: false },
+    { key: 'invitation', name: 'Invitation', icon: '💌', rule: PRIMARY_RULE, school: 'primary', speed: 'normal', quietHours: true, overrideOptOut: false },
+    { key: 'fees', name: 'Fees', icon: '💰', rule: PRIMARY_RULE, school: 'primary', speed: 'normal', quietHours: true, overrideOptOut: false },
+    { key: 'greeting', name: 'Greeting', icon: '🎉', rule: PRIMARY_RULE, school: 'primary', speed: 'safe', quietHours: true, overrideOptOut: false },
+    { key: 'reminder', name: 'Reminder', icon: '⏰', rule: PRIMARY_RULE, school: 'primary', speed: 'normal', quietHours: true, overrideOptOut: false },
+    { key: 'sos', name: 'SOS / Emergency', icon: '🚨', rule: { use: 'all' }, school: 'all', speed: 'urgent', quietHours: false, overrideOptOut: true },
+  ],
 };
+
+const SCHOOL_MODES: RecipientMode[] = ['primary', 'father', 'mother', 'both', 'student', 'all'];
+const slug = (s: string) => s.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 30);
+
+/** Validates edited message types; keeps keys stable so campaigns and list rules stay linked. */
+export function cleanMessageTypes(list: unknown): MessageType[] {
+  if (!Array.isArray(list) || !list.length) throw new BadRequestException('Keep at least one message type');
+  const seen = new Set<string>();
+  return list.slice(0, 30).map((raw: any) => {
+    const name = String(raw?.name ?? '').trim().slice(0, 40);
+    if (!name) throw new BadRequestException('Every message type needs a name');
+    let key = slug(String(raw?.key || name)) || 'type';
+    for (let i = 2; seen.has(key); i++) key = `${slug(String(raw?.key || name))}-${i}`;
+    seen.add(key);
+    return {
+      key, name, icon: String(raw?.icon ?? '').trim().slice(0, 4) || '✉️',
+      rule: cleanRule(raw?.rule) ?? PRIMARY_RULE,
+      school: SCHOOL_MODES.includes(raw?.school) ? raw.school : 'primary',
+      speed: ['urgent', 'normal', 'safe'].includes(raw?.speed) ? raw.speed : 'normal',
+      quietHours: raw?.quietHours !== false,
+      overrideOptOut: raw?.overrideOptOut === true,
+    };
+  });
+}
 
 @Injectable()
 export class SettingsService {
@@ -45,9 +90,15 @@ export class SettingsService {
     return this.cache;
   }
 
+  async messageType(key: string | null | undefined): Promise<MessageType | null> {
+    const s = await this.get();
+    return s.messageTypes.find((t) => t.key === key) ?? null;
+  }
+
   async update(patch: Partial<AppSettings>): Promise<AppSettings> {
     const next = deepMerge(await this.get(), patch) as AppSettings;
     next.optOutKeywords = next.optOutKeywords.map((k) => k.trim().toLowerCase()).filter(Boolean);
+    next.messageTypes = cleanMessageTypes(next.messageTypes);
     await this.db.query(
       `insert into settings(key, value, updated_at) values ('app', $1, now())
        on conflict (key) do update set value = excluded.value, updated_at = now()`,

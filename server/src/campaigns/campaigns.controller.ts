@@ -24,7 +24,7 @@ export class CampaignsController {
 
   @Get(':id/preview') preview(@Param('id', ParseIntPipe) id: number) { return this.campaigns.preview(id); }
   @Post(':id/test') test(@Param('id', ParseIntPipe) id: number, @Body() b: { phone: string; numberId: number }) { return this.campaigns.testSend(id, b.phone, Number(b.numberId)); }
-  @Post(':id/launch') launch(@Param('id', ParseIntPipe) id: number) { return this.campaigns.launch(id); }
+  @Post(':id/launch') launch(@Param('id', ParseIntPipe) id: number, @Body() b: { confirmOptOutOverride?: boolean }) { return this.campaigns.launch(id, b?.confirmOptOutOverride === true); }
   @Post(':id/pause') pause(@Param('id', ParseIntPipe) id: number) { return this.campaigns.setStatus(id, 'paused'); }
   @Post(':id/resume') resume(@Param('id', ParseIntPipe) id: number) { return this.campaigns.setStatus(id, 'running'); }
   @Post(':id/cancel') cancel(@Param('id', ParseIntPipe) id: number) { return this.campaigns.setStatus(id, 'cancelled'); }
