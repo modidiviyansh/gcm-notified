@@ -13,6 +13,7 @@ import { inQuietHours, localDate } from '../common/time';
 import { typingMs } from '../campaigns/estimate';
 import { readMedia, MediaRow } from '../media/media.controller';
 import { maskPhone } from '../common/phone';
+import { addDays, atLocal, localDay, spreadBlock, SpreadSchedule } from '../campaigns/schedule';
 
 interface MessageRow {
   id: number; campaign_id: number | null; number_id: number; chat_id: string; phone: string | null; body: string;
@@ -33,6 +34,7 @@ export class SenderService implements OnApplicationBootstrap, OnModuleDestroy {
   private loops = new Map<number, LoopState>();
   private stopping = false;
   readonly dirtyCampaigns = new Set<number>();
+  private spreadCache = { at: 0, blocked: [] as number[] };
 
   constructor(
     private readonly db: Db, private readonly waha: WahaClient, private readonly settings: SettingsService,
@@ -99,6 +101,7 @@ export class SenderService implements OnApplicationBootstrap, OnModuleDestroy {
     const s = await this.settings.get();
     const quiet = s.quietHours.enabled && inQuietHours(s.quietHours.start, s.quietHours.end);
 
+    const held = await this.spreadHeld();
     const msg = await this.db.one<MessageRow>(`
       with next as (
         select m.id from messages m left join campaigns c on c.id = m.campaign_id
@@ -107,17 +110,46 @@ export class SenderService implements OnApplicationBootstrap, OnModuleDestroy {
           and (m.campaign_id is null or c.status = 'running')
           and ((m.fixed_number and m.number_id = $1) or (not m.fixed_number and $1 = any(c.number_ids)))
           and (not $2 or m.campaign_id is null or not c.respect_quiet_hours)
+          and (m.campaign_id is null or not (m.campaign_id = any($3::int[])))
         order by m.priority desc, m.id
         limit 1
         for update of m skip locked
       )
       update messages m set status = 'sending', number_id = $1, attempts = m.attempts + 1
       from next where m.id = next.id
-      returning m.*`, [numberId, quiet]);
+      returning m.*`, [numberId, quiet, held]);
     if (!msg) return quiet ? 60_000 : 5_000;
 
     const speed = msg.campaign_id ? await this.db.one<Speed>('select * from campaigns where id=$1', [msg.campaign_id]) : null;
     if (msg.campaign_id) this.dirtyCampaigns.add(msg.campaign_id);
+
+    // Spread-out campaign: re-check its window and daily limit now (the held list above is cached for a few seconds)
+    const sched = (speed as any)?.schedule as SpreadSchedule | null;
+    if (sched?.mode === 'spread') {
+      const today = await this.db.one<{ n: number }>(
+        `select count(*)::int n from messages where campaign_id=$1 and id<>$2 and (sent_at >= $3 or status='sending')`, [msg.campaign_id, msg.id, atLocal(localDay(new Date()), 0)]);
+      if (spreadBlock(sched, new Date(), today?.n ?? 0, await this.campaigns.holidays())) {
+        await this.db.query(`update messages set status='queued', attempts=greatest(attempts-1,0) where id=$1`, [msg.id]);
+        this.spreadCache = { at: Date.now(), blocked: [...new Set([...this.spreadCache.blocked, msg.campaign_id!])] };
+        return 1000;
+      }
+    }
+
+    // Per-person daily cap across all campaigns (emergencies exempt): wait until tomorrow morning
+    const cap = s.frequencyCap?.perDay ?? 0;
+    if (cap > 0 && msg.campaign_id && msg.phone && !msg.ignore_opt_out) {
+      const today = atLocal(localDay(new Date()), 0);
+      const got = await this.db.one<{ n: number }>(
+        `select count(*)::int n from messages where phone=$1 and id<>$2 and campaign_id is not null and status in ('sent','delivered','read') and sent_at >= $3`,
+        [msg.phone, msg.id, today]);
+      if ((got?.n ?? 0) >= cap) {
+        const [h, m] = (s.quietHours.enabled ? s.quietHours.end : '08:00').split(':').map(Number);
+        const resume = atLocal(addDays(localDay(new Date()), 1), Math.max(h * 60 + m, 8 * 60));
+        await this.db.query(`update messages set status='queued', attempts=greatest(attempts-1,0), not_before=$2, error=$3 where id=$1`,
+          [msg.id, resume, `Waiting until tomorrow — already got ${got!.n} message${got!.n === 1 ? '' : 's'} today (limit ${cap})`]);
+        return 200;
+      }
+    }
 
     // Opt-out (checked again at send time — someone may have replied STOP since launch)
     if (msg.phone && !msg.ignore_opt_out && (await this.db.one('select 1 from opt_outs where phone=$1', [msg.phone]))) {
@@ -186,6 +218,19 @@ export class SenderService implements OnApplicationBootstrap, OnModuleDestroy {
     } catch {
       return null; // unknown → try sending anyway
     }
+  }
+
+  /** Spread-out campaigns that may not send right now (outside window / not a sending day / holiday / daily limit). */
+  private async spreadHeld(): Promise<number[]> {
+    if (Date.now() - this.spreadCache.at < 10_000) return this.spreadCache.blocked;
+    const rows = await this.db.query<{ id: number; schedule: SpreadSchedule; sent_today: number }>(`
+      select c.id, c.schedule,
+        (select count(*)::int from messages m where m.campaign_id = c.id and (m.sent_at >= $1 or m.status = 'sending')) as sent_today
+      from campaigns c where c.status = 'running' and c.schedule->>'mode' = 'spread'`, [atLocal(localDay(new Date()), 0)]);
+    const holidays = rows.length ? await this.campaigns.holidays() : new Set<string>();
+    const now = new Date();
+    this.spreadCache = { at: Date.now(), blocked: rows.filter((r) => spreadBlock(r.schedule, now, r.sent_today, holidays)).map((r) => r.id) };
+    return this.spreadCache.blocked;
   }
 
   private async finish(id: number, status: string, error: string | null, wahaId: string | null = null) {

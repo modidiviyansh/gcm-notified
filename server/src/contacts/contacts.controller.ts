@@ -67,6 +67,16 @@ export class ContactsController {
     return this.db.one('update contact_groups set rules=$2 where id=$1 returning id, rules', [id, JSON.stringify(cleanRules(b.rules))]);
   }
 
+  /** Column names in the given lists (from imported CSVs), for picking a date column. */
+  @Get('columns')
+  async columns(@Query('groupIds') ids = '') {
+    const groupIds = ids.split(',').map(Number).filter(Number.isFinite);
+    if (!groupIds.length) return [];
+    return (await this.db.query<{ k: string }>(
+      `select k, count(*)::int n from list_members m join contact_groups g on g.id = m.group_id, jsonb_object_keys(m.extra) k
+       where g.id = any($1) or g.parent_id = any($1) group by k order by n desc, k limit 50`, [groupIds])).map((r) => r.k);
+  }
+
   @Get('labels')
   async labels(@Query('groupId') groupId?: string) {
     return { used: await this.people.labels(groupId ? Number(groupId) : undefined), common: COMMON_LABELS };

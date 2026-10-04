@@ -86,6 +86,18 @@ export default function Settings() {
           <p className="mt-3 text-xs text-slate-500">Per-number warm-up (age, activity, business profile) is set on the <b>Numbers</b> page.</p>
         </Card>
 
+        <Card title="Scheduling">
+          <div className="space-y-3">
+            <Field label="Messages per person per day (all campaigns)" hint="Repeating and date-based schedules can't flood the same parent. Extra messages wait until the next morning. Emergency types are exempt. 0 = no limit.">
+              <input className="input" type="number" min={0} max={50} value={s.frequencyCap.perDay} onChange={(e) => set('frequencyCap.perDay', Number(e.target.value))} />
+            </Field>
+            <Field label="Extra holidays" hint={`One date per line (YYYY-MM-DD). ${sys?.holidays ? `${sys.holidays} holidays come from the school system.` : 'School holidays from Frappe appear here once it can read the Holiday List.'}`}>
+              <textarea className="input h-24 font-mono text-xs" defaultValue={s.holidays.join('\n')} placeholder={'2026-10-20\n2026-11-08'}
+                onBlur={(e) => set('holidays', e.target.value.split(/[\n,]+/).map((x) => x.trim()).filter(Boolean))} />
+            </Field>
+          </div>
+        </Card>
+
         <Card title="Privacy">
           <div className="space-y-3">
             <Toggle checked={s.privacy.maskPhones} onChange={(v) => set('privacy.maskPhones', v)} label="Hide phone numbers"

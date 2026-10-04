@@ -7,6 +7,7 @@ export type RecipientMode = 'father' | 'mother' | 'both' | 'primary' | 'student'
 export interface StudentRow {
   id: number; admission_no: string; student_name: string; program: string | null; section: string | null;
   father_name: string | null; mother_name: string | null; father_phone: string | null; mother_phone: string | null; student_phone: string | null;
+  dob?: string | null;
   csv?: Record<string, string> | null;
 }
 export interface ContactRow { id: number; name: string | null; phone: string; label?: string | null; extra?: Record<string, string> | null; csv?: Record<string, string> | null }

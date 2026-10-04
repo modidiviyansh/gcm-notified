@@ -79,7 +79,7 @@ export class FrappeSyncService implements OnApplicationBootstrap {
     }
 
     const students = await this.get<any>('Student', [
-      'name', 'custom_admission_number', 'student_name', 'custom_father_mobile_number', 'custom_mother_mobile_number', 'student_mobile_number',
+      'name', 'custom_admission_number', 'student_name', 'custom_father_mobile_number', 'custom_mother_mobile_number', 'student_mobile_number', 'date_of_birth',
     ], [['enabled', '=', 1]]);
 
     // Guardian names + numbers (fallback when the student-level fields are empty)
@@ -148,16 +148,16 @@ export class FrappeSyncService implements OnApplicationBootstrap {
         }
         const p = parentInfo.get(st.name) ?? {};
         await c.query(
-          `insert into students(frappe_id, admission_no, student_name, program, section, group_id, father_name, mother_name, father_phone, mother_phone, student_phone, active, synced_at)
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,now())
+          `insert into students(frappe_id, admission_no, student_name, program, section, group_id, father_name, mother_name, father_phone, mother_phone, student_phone, dob, active, synced_at)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,true,now())
            on conflict (frappe_id) do update set admission_no=excluded.admission_no, student_name=excluded.student_name, program=excluded.program,
              section=excluded.section, group_id=excluded.group_id, father_name=excluded.father_name, mother_name=excluded.mother_name,
-             father_phone=excluded.father_phone, mother_phone=excluded.mother_phone, student_phone=excluded.student_phone, active=true, synced_at=now()`,
+             father_phone=excluded.father_phone, mother_phone=excluded.mother_phone, student_phone=excluded.student_phone, dob=excluded.dob, active=true, synced_at=now()`,
           [st.name, String(st.custom_admission_number).trim(), st.student_name, program, sec?.section ?? null, sid,
            p.father?.name ?? null, p.mother?.name ?? null,
            normalizePhone(st.custom_father_mobile_number) ?? normalizePhone(p.father?.phone),
            normalizePhone(st.custom_mother_mobile_number) ?? normalizePhone(p.mother?.phone),
-           normalizePhone(st.student_mobile_number)],
+           normalizePhone(st.student_mobile_number), /^\d{4}-\d{2}-\d{2}$/.test(String(st.date_of_birth ?? '')) ? st.date_of_birth : null],
         );
         count++;
       }
@@ -168,6 +168,24 @@ export class FrappeSyncService implements OnApplicationBootstrap {
     });
 
     const missing = await this.db.one<{ n: number }>(`select count(*)::int n from students where active and father_phone is null and mother_phone is null`);
-    return { academicYear: year, students: count, groups, subgroups, missingNumbers: missing?.n ?? 0 };
+    return { academicYear: year, students: count, groups, subgroups, missingNumbers: missing?.n ?? 0, holidays: await this.syncHolidays() };
+  }
+
+  /** School holidays from Frappe's Holiday List (weekly offs left out — sending days cover those). Needs read permission. */
+  private async syncHolidays(): Promise<number | string> {
+    try {
+      const rows = await this.get<any>('Holiday List', ['name', 'holidays.holiday_date', 'holidays.description', 'holidays.weekly_off']);
+      const days = rows.filter((r) => r.holiday_date && !r.weekly_off);
+      await this.db.tx(async (c) => {
+        await c.query(`delete from holidays where source='frappe'`);
+        for (const d of days) {
+          await c.query(`insert into holidays(day, name, source) values ($1,$2,'frappe') on conflict (day) do nothing`,
+            [d.holiday_date, String(d.description ?? '').replace(/<[^>]+>/g, '').trim().slice(0, 120) || null]);
+        }
+      });
+      return days.length;
+    } catch (e) {
+      return /HTTP 403/.test((e as Error).message) ? 'no access' : `failed: ${(e as Error).message}`;
+    }
   }
 }

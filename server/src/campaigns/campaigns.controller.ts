@@ -22,6 +22,8 @@ export class CampaignsController {
   }
   @Delete(':id/csv') removeCsv(@Param('id', ParseIntPipe) id: number) { return this.campaigns.removeCsv(id); }
 
+  @Get(':id/schedule') schedule(@Param('id', ParseIntPipe) id: number) { return this.campaigns.schedulePreview(id); }
+  @Post(':id/unschedule') unschedule(@Param('id', ParseIntPipe) id: number) { return this.campaigns.unschedule(id); }
   @Get(':id/preview') preview(@Param('id', ParseIntPipe) id: number) { return this.campaigns.preview(id); }
   @Post(':id/test') test(@Param('id', ParseIntPipe) id: number, @Body() b: { phone: string; numberId: number }) { return this.campaigns.testSend(id, b.phone, Number(b.numberId)); }
   @Post(':id/launch') launch(@Param('id', ParseIntPipe) id: number, @Body() b: { confirmOptOutOverride?: boolean }) { return this.campaigns.launch(id, b?.confirmOptOutOverride === true); }

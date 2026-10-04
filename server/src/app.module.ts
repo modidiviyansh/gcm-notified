@@ -16,6 +16,7 @@ import { MediaController } from './media/media.controller';
 import { CampaignsService } from './campaigns/campaigns.service';
 import { CampaignsController, TemplatesController } from './campaigns/campaigns.controller';
 import { SenderService } from './sender/sender.service';
+import { SchedulerService } from './campaigns/scheduler.service';
 import { WebhooksController } from './webhooks/webhooks.controller';
 
 @Module({
@@ -26,7 +27,7 @@ import { WebhooksController } from './webhooks/webhooks.controller';
   ],
   providers: [
     { provide: APP_GUARD, useClass: AuthGuard },
-    Db, WahaClient, SettingsService, AlertsService, NumbersService, FrappeSyncService, PeopleService, CampaignsService, SenderService,
+    Db, WahaClient, SettingsService, AlertsService, NumbersService, FrappeSyncService, PeopleService, CampaignsService, SchedulerService, SenderService,
   ],
 })
 export class AppModule {}

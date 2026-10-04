@@ -27,6 +27,8 @@ export interface AppSettings {
   autoPause: { failureRatePct: number; minSamples: number };
   privacy: { maskPhones: boolean; rehideSeconds: number };
   messageTypes: MessageType[];
+  frequencyCap: { perDay: number };   // messages per person per day across all campaigns (0 = off; emergencies exempt)
+  holidays: string[];                  // extra holidays (YYYY-MM-DD) on top of Frappe's Holiday List
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -44,6 +46,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   frappe: { academicYear: '', excludePrograms: ['Dummy', 'Dummy class'], syncEveryHours: 6 },
   autoPause: { failureRatePct: 5, minSamples: 20 },
   privacy: { maskPhones: true, rehideSeconds: 30 },
+  frequencyCap: { perDay: 3 },
+  holidays: [],
   messageTypes: [
     { key: 'notice', name: 'Notice', icon: '📢', rule: PRIMARY_RULE, school: 'primary', speed: 'normal', quietHours: true, overrideOptOut: false },
     { key: 'invitation', name: 'Invitation', icon: '💌', rule: PRIMARY_RULE, school: 'primary', speed: 'normal', quietHours: true, overrideOptOut: false },
@@ -99,6 +103,8 @@ export class SettingsService {
     const next = deepMerge(await this.get(), patch) as AppSettings;
     next.optOutKeywords = next.optOutKeywords.map((k) => k.trim().toLowerCase()).filter(Boolean);
     next.messageTypes = cleanMessageTypes(next.messageTypes);
+    next.frequencyCap = { perDay: Math.max(0, Math.min(50, Math.round(Number(next.frequencyCap?.perDay) || 0))) };
+    next.holidays = [...new Set((next.holidays ?? []).map((d) => String(d).trim()).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)))].sort();
     await this.db.query(
       `insert into settings(key, value, updated_at) values ('app', $1, now())
        on conflict (key) do update set value = excluded.value, updated_at = now()`,

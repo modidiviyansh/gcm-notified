@@ -4,6 +4,7 @@ import { api, fmtDate, fmtDuration } from '../api';
 import { Badge, Card, Empty, ErrorNote, Field, Modal, MsOption, MultiSelect, PageHeader, statusLabel, Toggle, useLoad, useToast } from '../components/ui';
 import type { GroupNode } from './Contacts';
 import { describeRule, MessageType, RuleEditor, SCHOOL_LABEL, useLabels } from '../components/rules';
+import { describeSchedule, isTemplateSchedule, WhenPicker } from '../components/schedule';
 
 const STUDENT_VARS = ['student_name', 'first_name', 'admission_no', 'class', 'section', 'parent_name', 'father_name', 'mother_name', 'relation', 'child_count'];
 const PRESET_LABEL = { urgent: 'Urgent', normal: 'Normal', safe: 'Safe' } as const;
@@ -38,11 +39,18 @@ export default function CampaignEditor() {
     try { setPreview(await api.get(`/campaigns/${id}/preview`)); } catch (e) { toast((e as Error).message, 'error'); } finally { setBusy(false); }
   };
 
+  const activate = async () => {
+    if (!confirm(`Activate this schedule?\n\n${describeSchedule(c.schedule)}\n\nEach run is sent automatically and gets its own report.`)) return;
+    window.clearTimeout(saveTimer.current);
+    setBusy(true);
+    try { await api.put(`/campaigns/${id}`, { body: c.body, name: c.name }); await api.post(`/campaigns/${id}/launch`, {}); toast('Schedule activated'); nav(`/campaigns/${id}`); }
+    catch (e) { toast((e as Error).message, 'error'); } finally { setBusy(false); }
+  };
   const launch = async () => {
     if (!preview) return;
     const overriding = preview.overrideOptOut && preview.optedOut > 0;
     if (overriding && !confirm(`🚨 ${preview.optedOut} of these people replied STOP.\n\nThis is an emergency message type, so it WILL be sent to them too. This is logged in Activity.\n\nContinue?`)) return;
-    if (!confirm(`Start sending to ${sendableOf(preview)} recipients now?`)) return;
+    if (!confirm(c.schedule?.mode === 'spread' ? `Start sending to ${sendableOf(preview)} recipients?\n\n${describeSchedule(c.schedule)}` : `Start sending to ${sendableOf(preview)} recipients now?`)) return;
     setBusy(true);
     try { await api.post(`/campaigns/${id}/launch`, { confirmOptOutOverride: overriding }); toast('Campaign started'); nav(`/campaigns/${id}`); } catch (e) { toast((e as Error).message, 'error'); } finally { setBusy(false); }
   };
@@ -106,12 +114,19 @@ export default function CampaignEditor() {
           <Speed c={c} presets={settings.speedPresets} onPatch={patch} quiet={settings.quietHours} />
         </Step>
 
-        <Step n={step++} title="Review & launch">
+        <Step n={step++} title="When">
+          <WhenPicker c={c} isGroups={isGroups} onSaved={(u) => setData((o: any) => ({ ...o, schedule: u.schedule }))} />
+        </Step>
+
+        <Step n={step++} title={isTemplateSchedule(c.schedule) ? 'Review & activate' : 'Review & launch'}>
           <div className="flex flex-wrap gap-2">
-            <button className="btn-secondary" onClick={loadPreview} disabled={busy}>{busy ? 'Checking…' : preview ? 'Refresh preview' : 'Preview messages'}</button>
+            {c.schedule?.mode !== 'dated' && <button className="btn-secondary" onClick={loadPreview} disabled={busy}>{busy ? 'Checking…' : preview ? 'Refresh preview' : 'Preview messages'}</button>}
             {preview && <TestSend id={c.id} numbers={(numbers ?? []).filter((n) => n.status === 'WORKING')} />}
-            <button className="btn-primary" onClick={launch} disabled={busy || !preview || !sendableOf(preview)}>Launch campaign</button>
+            {isTemplateSchedule(c.schedule)
+              ? <button className="btn-primary" onClick={activate} disabled={busy}>Activate schedule</button>
+              : <button className="btn-primary" onClick={launch} disabled={busy || !preview || !sendableOf(preview)}>{c.schedule?.mode === 'spread' ? 'Start (spread out)' : 'Launch campaign'}</button>}
           </div>
+          {c.schedule?.mode === 'repeat' && <p className="mt-2 text-xs text-slate-500">The preview shows today's audience; every run works it out again.</p>}
           {preview && <Preview p={preview} />}
         </Step>
       </div>

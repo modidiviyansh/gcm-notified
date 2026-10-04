@@ -2,6 +2,9 @@ import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api, fmtDate } from '../api';
 import { Badge, Empty, ErrorNote, Field, Modal, PageHeader, Progress, statusTone, useLoad, useToast } from '../components/ui';
+import { isTemplateSchedule } from '../components/schedule';
+
+const MODE_LABEL: Record<string, string> = { spread: 'spread out', repeat: 'repeating', dated: 'date-based' };
 
 export default function Campaigns() {
   const nav = useNavigate();
@@ -32,10 +35,13 @@ export default function Campaigns() {
                 <tr key={c.id} className="hover:bg-slate-50">
                   <td>
                     <Link to={c.status === 'draft' ? `/campaigns/${c.id}/edit` : `/campaigns/${c.id}`} className="font-medium hover:underline">{c.name}</Link>
-                    <div className="text-xs text-slate-500">{c.kind === 'wa_groups' ? 'Groups & channels' : 'Contacts'}</div>
+                    <div className="text-xs text-slate-500">{c.kind === 'wa_groups' ? 'Groups & channels' : 'Contacts'}{c.schedule ? ` · ${MODE_LABEL[c.schedule.mode]}` : ''}</div>
                   </td>
-                  <td><Badge tone={statusTone(c.status)}>{c.status}</Badge></td>
-                  <td>{c.total ? <><Progress value={c.sent + c.failed + c.skipped} max={c.total} /><div className="mt-1 text-xs text-slate-500">{c.sent}/{c.total}</div></> : '—'}</td>
+                  <td>
+                    <Badge tone={statusTone(c.status)}>{isTemplateSchedule(c.schedule) && c.status === 'completed' ? 'ended' : c.status}</Badge>
+                    {c.status === 'scheduled' && c.next_run_at && <div className="mt-1 text-xs text-slate-500">next {fmtDate(c.next_run_at)}</div>}
+                  </td>
+                  <td>{isTemplateSchedule(c.schedule) ? <span className="text-xs text-slate-500">{c.runs} run{c.runs === 1 ? '' : 's'}</span> : c.total ? <><Progress value={c.sent + c.failed + c.skipped} max={c.total} /><div className="mt-1 text-xs text-slate-500">{c.sent}/{c.total}</div></> : '—'}</td>
                   <td>{c.delivered}</td><td>{c.read}</td><td className={c.failed ? 'text-red-600' : ''}>{c.failed}</td>
                   <td className="text-xs text-slate-500">{fmtDate(c.created_at)}</td>
                 </tr>

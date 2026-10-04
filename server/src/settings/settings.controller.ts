@@ -37,7 +37,8 @@ export class SettingsController {
   async system() {
     let waha: string;
     try { await this.waha.listSessions(); waha = 'ok'; } catch (e) { waha = (e as Error).message; }
-    return { waha, frappe: frappeConfigured(), smtp: smtpConfigured(), sendingEnabled: config.sendingEnabled, publicUrl: config.publicUrl, timezone: config.timezone };
+    const holidays = (await this.db.one<{ n: number }>(`select count(*)::int n from holidays where source='frappe'`))?.n ?? 0;
+    return { waha, frappe: frappeConfigured(), smtp: smtpConfigured(), sendingEnabled: config.sendingEnabled, publicUrl: config.publicUrl, timezone: config.timezone, holidays };
   }
 
   @Public()

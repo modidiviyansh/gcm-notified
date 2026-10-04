@@ -40,7 +40,7 @@ export function Badge({ tone = 'slate', children }: { tone?: keyof typeof TONES 
 
 export const statusTone = (s: string) =>
   ({ WORKING: 'green', SCAN_QR_CODE: 'amber', STARTING: 'blue', FAILED: 'red', STOPPED: 'slate',
-     running: 'blue', paused: 'amber', completed: 'green', cancelled: 'slate', draft: 'slate',
+     running: 'blue', scheduled: 'violet', paused: 'amber', completed: 'green', cancelled: 'slate', draft: 'slate',
      queued: 'slate', sending: 'blue', sent: 'blue', delivered: 'green', read: 'violet', failed: 'red', skipped: 'amber' } as Record<string, string>)[s] ?? 'slate';
 
 export const statusLabel = (s: string) =>

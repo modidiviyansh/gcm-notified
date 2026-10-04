@@ -1,10 +1,13 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { Pool, PoolClient, QueryResultRow } from 'pg';
+import { Pool, PoolClient, QueryResultRow, types } from 'pg';
 import { readdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { config } from '../config';
 
 export const SCHEMA = 'whatsapp';
+
+// `date` columns as plain YYYY-MM-DD strings (no timezone shift); timestamps stay Date objects
+types.setTypeParser(1082, (v: string) => v);
 
 @Injectable()
 export class Db implements OnModuleInit, OnModuleDestroy {
