@@ -51,7 +51,7 @@ export default function Numbers() {
           <Card key={n.id} title={<span className="flex items-center gap-2">{n.label}<Badge tone={LEVEL_TONE[n.level]}>{n.level} · {n.score}</Badge></span>}
             actions={n.paused ? <Badge tone="amber">Paused</Badge> : <Badge tone={statusTone(n.status)}>{statusLabel(n.status)}</Badge>}>
             <div className="mb-3 grid grid-cols-2 gap-2 text-sm">
-              <div><span className="text-slate-500">Phone</span><div className="font-medium"><Phone value={n.phone} pref={(n as any).phone_ref} /></div></div>
+              <div><span className="text-slate-500">Phone</span><div className="font-medium"><Phone value={n.phone} /></div></div>
               <div><span className="text-slate-500">WhatsApp name</span><div className="font-medium">{n.push_name ?? '—'}</div></div>
             </div>
             {n.paused && n.pause_reason && <div className="mb-3 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800">{n.pause_reason}</div>}

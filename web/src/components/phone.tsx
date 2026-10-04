@@ -3,74 +3,71 @@ import { useLocation } from 'react-router-dom';
 import { api, fmtPhone } from '../api';
 import { useToast } from './ui';
 
-// Numbers arrive from the server masked ("•••••• 3210") with an encrypted `<key>_ref`. Revealing one asks the
-// server (which logs it), shows it for `rehideSeconds`, then hides it again. Leaving the page hides everything.
-
-const PAGE_NAMES: [RegExp, string][] = [
-  [/^\/contacts/, 'Contacts'], [/^\/campaigns\/\d+$/, 'Campaign report'], [/^\/campaigns/, 'Campaigns'],
-  [/^\/numbers/, 'Numbers'], [/^\/$/, 'Dashboard'],
-];
+// Display-only privacy: numbers are hidden on screen ("•••••• 3210") and shown with the eye button.
+// Nothing is fetched to reveal; a shown number hides again after `rehideSeconds` or when the page changes.
 
 interface Ctx {
-  revealed: Record<string, string>;
-  reveal: (refs: string[]) => Promise<void>;
-  hide: (refs?: string[]) => void;
-  register: (ref: string) => () => void;
-  pageRefs: () => string[];
+  enabled: boolean;
+  shown: Set<string>;
+  show: (phones: string[]) => void;
+  hide: (phones?: string[]) => void;
+  register: (phone: string) => () => void;
+  pagePhones: () => string[];
   version: number;
 }
 const PrivacyCtx = createContext<Ctx | null>(null);
 
+export const maskPhone = (p: string) => `•••••• ${p.replace(/\D/g, '').slice(-4)}`;
+
 export function PrivacyProvider({ children }: { children: ReactNode }) {
-  const toast = useToast();
   const loc = useLocation();
-  const [revealed, setRevealed] = useState<Record<string, string>>({});
+  const [enabled, setEnabled] = useState(true);
+  const [shown, setShown] = useState<Set<string>>(() => new Set());
   const [version, setVersion] = useState(0);
   const rehide = useRef(30);
   const timers = useRef(new Map<string, number>());
   const mounted = useRef(new Map<string, number>());
-  const bump = useRef(0);
+  const frame = useRef(0);
 
-  useEffect(() => { api.get('/settings').then((s) => { rehide.current = Number(s?.privacy?.rehideSeconds) || 30; }).catch(() => {}); }, []);
+  useEffect(() => {
+    api.get('/settings').then((s) => {
+      setEnabled(s?.privacy?.maskPhones !== false);
+      rehide.current = Number(s?.privacy?.rehideSeconds) || 30;
+    }).catch(() => {});
+  }, []);
 
-  const hide = useCallback((refs?: string[]) => {
-    const list = refs ?? [...timers.current.keys()];
-    for (const r of list) { clearTimeout(timers.current.get(r)); timers.current.delete(r); }
-    setRevealed((cur) => {
-      if (!refs) return {};
-      const next = { ...cur };
-      for (const r of refs) delete next[r];
+  const hide = useCallback((phones?: string[]) => {
+    const list = phones ?? [...timers.current.keys()];
+    for (const p of list) { clearTimeout(timers.current.get(p)); timers.current.delete(p); }
+    setShown((cur) => {
+      if (!phones) return new Set();
+      const next = new Set(cur);
+      for (const p of phones) next.delete(p);
       return next;
     });
   }, []);
 
   useEffect(() => () => hide(), [loc.pathname, hide]);
 
-  const reveal = useCallback(async (refs: string[]) => {
-    const want = refs.filter(Boolean);
-    if (!want.length) return;
-    const where = PAGE_NAMES.find(([re]) => re.test(loc.pathname))?.[1] ?? 'the dashboard';
-    try {
-      const { phones } = await api.post<{ phones: Record<string, string> }>('/reveal', { refs: want, where });
-      setRevealed((cur) => ({ ...cur, ...phones }));
-      for (const r of Object.keys(phones)) {
-        clearTimeout(timers.current.get(r));
-        timers.current.set(r, window.setTimeout(() => hide([r]), rehide.current * 1000));
-      }
-    } catch (e) { toast((e as Error).message, 'error'); }
-  }, [loc.pathname, hide, toast]);
+  const show = useCallback((phones: string[]) => {
+    setShown((cur) => new Set([...cur, ...phones]));
+    for (const p of phones) {
+      clearTimeout(timers.current.get(p));
+      timers.current.set(p, window.setTimeout(() => hide([p]), rehide.current * 1000));
+    }
+  }, [hide]);
 
-  // Phone cells register their ref so "Show all" knows what is on screen. Re-render is coalesced per frame.
-  const register = useCallback((ref: string) => {
+  // Phone cells register themselves so "Show all" knows what is on screen; re-render is coalesced per frame
+  const register = useCallback((phone: string) => {
     const m = mounted.current;
-    m.set(ref, (m.get(ref) ?? 0) + 1);
-    const changed = () => { cancelAnimationFrame(bump.current); bump.current = requestAnimationFrame(() => setVersion((v) => v + 1)); };
+    m.set(phone, (m.get(phone) ?? 0) + 1);
+    const changed = () => { cancelAnimationFrame(frame.current); frame.current = requestAnimationFrame(() => setVersion((v) => v + 1)); };
     changed();
-    return () => { const n = (m.get(ref) ?? 1) - 1; if (n) m.set(ref, n); else m.delete(ref); changed(); };
+    return () => { const n = (m.get(phone) ?? 1) - 1; if (n) m.set(phone, n); else m.delete(phone); changed(); };
   }, []);
-  const pageRefs = useCallback(() => [...mounted.current.keys()], []);
+  const pagePhones = useCallback(() => [...mounted.current.keys()], []);
 
-  const value = useMemo(() => ({ revealed, reveal, hide, register, pageRefs, version }), [revealed, reveal, hide, register, pageRefs, version]);
+  const value = useMemo(() => ({ enabled, shown, show, hide, register, pagePhones, version }), [enabled, shown, show, hide, register, pagePhones, version]);
   return <PrivacyCtx.Provider value={value}>{children}</PrivacyCtx.Provider>;
 }
 
@@ -83,45 +80,45 @@ const EyeIcon = ({ off }: { off?: boolean }) => (
   </svg>
 );
 
-/** A phone number: masked with a 👁 button, or the full number with copy + hide. */
-export function Phone({ value, pref, missing = '—', className = '' }: { value?: string | null; pref?: string | null; missing?: ReactNode; className?: string }) {
+/** A phone number: hidden with a 👁 button, or shown with copy + hide. */
+export function Phone({ value, missing = '—', className = '' }: { value?: string | null; missing?: ReactNode; className?: string }) {
   const p = usePrivacy();
   const toast = useToast();
-  useEffect(() => (pref && p ? p.register(pref) : undefined), [pref, p?.register]);
+  const active = !!(value && p?.enabled);
+  useEffect(() => (active && value ? p!.register(value) : undefined), [active, value, p?.register]);
   if (!value) return <span className={className}>{missing}</span>;
-  const full = pref ? p?.revealed[pref] : undefined;
-  if (!pref || !p) return <span className={`whitespace-nowrap ${className}`}>{fmtPhone(value)}</span>;
+  if (!active) return <span className={`whitespace-nowrap ${className}`}>{fmtPhone(value)}</span>;
   const btn = 'inline-grid h-5 w-5 place-items-center rounded text-slate-400 hover:bg-slate-100 hover:text-slate-700';
-  if (!full) {
+  if (!p!.shown.has(value)) {
     return (
       <span className={`inline-flex items-center gap-1 whitespace-nowrap ${className}`}>
-        <span className="font-mono tracking-tight">{value}</span>
-        <button type="button" className={btn} title="Show number" aria-label="Show number" onClick={() => p.reveal([pref])}><EyeIcon /></button>
+        <span className="font-mono tracking-tight">{maskPhone(value)}</span>
+        <button type="button" className={btn} title="Show number" aria-label="Show number" onClick={() => p!.show([value])}><EyeIcon /></button>
       </span>
     );
   }
   const copy = async () => {
-    try { await navigator.clipboard.writeText('+' + full); toast('Number copied'); } catch { toast('Copy failed — select the number instead', 'error'); }
+    try { await navigator.clipboard.writeText('+' + value); toast('Number copied'); } catch { toast('Copy failed — select the number instead', 'error'); }
   };
   return (
     <span className={`inline-flex items-center gap-1 whitespace-nowrap ${className}`}>
-      <span className="font-medium text-slate-800">{fmtPhone(full)}</span>
+      <span className="font-medium text-slate-800">{fmtPhone(value)}</span>
       <button type="button" className={btn} title="Copy" aria-label="Copy number" onClick={copy}>
         <svg viewBox="0 0 20 20" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden><rect x="7" y="7" width="10" height="10" rx="2" /><path d="M13 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2" /></svg>
       </button>
-      <button type="button" className={btn} title="Hide number" aria-label="Hide number" onClick={() => p.hide([pref])}><EyeIcon off /></button>
+      <button type="button" className={btn} title="Hide number" aria-label="Hide number" onClick={() => p!.hide([value])}><EyeIcon off /></button>
     </span>
   );
 }
 
-/** "Show all numbers" for whatever phone cells are currently on the page (one request, one log entry). */
+/** "Show all numbers" / "Hide numbers" for the phone cells currently on the page. */
 export function RevealAll() {
   const p = usePrivacy();
-  if (!p) return null;
-  const refs = p.pageRefs();
-  if (!refs.length) return null;
-  const allShown = refs.every((r) => p.revealed[r]);
-  return allShown
-    ? <button type="button" className="btn-secondary inline-flex items-center gap-1.5 whitespace-nowrap" onClick={() => p.hide(refs)}><EyeIcon off /> Hide numbers</button>
-    : <button type="button" className="btn-secondary inline-flex items-center gap-1.5 whitespace-nowrap" onClick={() => p.reveal(refs.filter((r) => !p.revealed[r]))}><EyeIcon /> Show all numbers</button>;
+  if (!p?.enabled) return null;
+  const phones = p.pagePhones();
+  if (!phones.length) return null;
+  const cls = 'btn-secondary inline-flex items-center gap-1.5 whitespace-nowrap';
+  return phones.every((x) => p.shown.has(x))
+    ? <button type="button" className={cls} onClick={() => p.hide(phones)}><EyeIcon off /> Hide numbers</button>
+    : <button type="button" className={cls} onClick={() => p.show(phones)}><EyeIcon /> Show all numbers</button>;
 }

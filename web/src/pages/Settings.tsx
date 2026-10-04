@@ -86,7 +86,7 @@ export default function Settings() {
         <Card title="Privacy">
           <div className="space-y-3">
             <Toggle checked={s.privacy.maskPhones} onChange={(v) => set('privacy.maskPhones', v)} label="Hide phone numbers"
-              hint="Numbers show only their last 4 digits. Click the eye to see one; every view is written to Activity." />
+              hint="Numbers show only their last 4 digits on screen. Click the eye to see one." />
             <Field label="Hide again after (seconds)">
               <input className="input" type="number" min={5} max={600} value={s.privacy.rehideSeconds} onChange={(e) => set('privacy.rehideSeconds', Math.min(600, Math.max(5, Number(e.target.value) || 30)))} />
             </Field>
