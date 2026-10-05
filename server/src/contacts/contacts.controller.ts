@@ -1,15 +1,15 @@
+import { readSheet } from '../common/sheet';
 import { BadRequestException, Body, Controller, Delete, Get, NotFoundException, Param, ParseIntPipe, Post, Put, Query, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { parse } from 'csv-parse/sync';
 import { Db } from '../db/db.service';
 import { FrappeSyncService } from './frappe-sync.service';
 import { normalizePhone } from '../common/phone';
 import { detectNameColumn, detectPhoneColumns, NewPerson, parsePaste, PeopleService, PhoneColumn } from './people.service';
 import { cleanLabel, cleanRules, COMMON_LABELS, labelForColumn } from './rules';
 
-export function parseCsv(buf: Buffer): Record<string, string>[] {
-  const text = buf.toString('utf8').replace(/^﻿/, '');
-  return parse(text, { columns: (h: string[]) => h.map((x) => x.trim()), skip_empty_lines: true, trim: true, relax_column_count: true, bom: true });
+/** CSV or Excel (.xlsx) → rows keyed by the header row. */
+export function parseCsv(buf: Buffer, filename = ''): Record<string, string>[] {
+  return readSheet(buf, filename);
 }
 
 // A person's numbers as JSON: [{phone, label, is_primary, opted_out}], primary first
@@ -172,7 +172,7 @@ export class ContactsController {
 
   private csvRows(file?: Express.Multer.File) {
     if (!file) throw new BadRequestException('CSV file is required');
-    const rows = parseCsv(file.buffer);
+    const rows = parseCsv(file.buffer, file.originalname);
     if (!rows.length) throw new BadRequestException('CSV is empty');
     return rows;
   }

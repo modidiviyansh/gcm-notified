@@ -6,7 +6,7 @@ import { parseCsv } from '../contacts/contacts.controller';
 import { normalizePhone, toChatId } from '../common/phone';
 import { checkTemplate, contactRecipients, ContactRow, Recipient, RecipientMode, renderMessage, StudentRow, studentRecipients, varName } from './render';
 import { estimate } from './estimate';
-import { PeopleService } from '../contacts/people.service';
+import { detectNameColumn, detectPhoneColumns, PeopleService } from '../contacts/people.service';
 import { cleanRule, describeRule, NumberRule } from '../contacts/rules';
 import { addDays, cleanSchedule, dateMatches, DatedSchedule, localDay, nextRunAt, offsetLabel, parseDate, RepeatSchedule, Schedule, spreadPlan, upcoming, variants } from './schedule';
 
@@ -25,7 +25,12 @@ export interface Campaign {
   total: number; sent: number; delivered: number; read: number; failed: number; skipped: number;
   created_at: Date; started_at: Date | null; finished_at: Date | null;
 }
-interface CsvInfo { filename: string; keyColumn: string; keyType: 'admission' | 'phone'; nameColumn?: string | null; columns: string[]; variables: string[]; rows: number; matched: number; unmatched: number }
+type CsvMode = 'admission' | 'phone';
+export interface CsvMapping { mode?: CsvMode; keyColumn?: string; nameColumn?: string | null }
+interface CsvInfo {
+  filename: string; keyColumn: string; keyType: CsvMode; nameColumn?: string | null; columns: string[]; variables: string[];
+  rows: number; matched: number; unmatched: number; duplicates?: number; examples?: Record<string, string>; unmatchedSamples?: string[];
+}
 
 const EDITABLE = ['name', 'body', 'media_id', 'recipient_mode', 'per_child', 'number_ids', 'delay_min_ms', 'delay_max_ms', 'burst_min', 'burst_max',
   'burst_pause_min_ms', 'burst_pause_max_ms', 'typing', 'respect_quiet_hours', 'audience', 'message_type', 'number_rule', 'schedule'] as const;
@@ -136,46 +141,111 @@ export class CampaignsService {
   }
 
   // ---------- CSV ----------
-  async uploadCsv(id: number, file: Express.Multer.File | undefined, keyColumn?: string) {
+  /**
+   * A sheet (CSV or Excel) for this campaign, in one of two ways:
+   *  - 'admission': rows are matched to students by admission number; phones come from the school records
+   *  - 'phone':     the sheet itself is the list — a mobile number per row, plus a name and any other columns
+   * Every column becomes a message variable. The rows are kept, so the mapping can be changed without re-uploading.
+   */
+  async uploadCsv(id: number, file: Express.Multer.File | undefined, opts: CsvMapping = {}) {
     const c = await this.get(id);
-    if (c.status !== 'draft') throw new BadRequestException('CSV can only be changed on a draft campaign');
-    if (!file) throw new BadRequestException('CSV file is required');
-    const rows = parseCsv(file.buffer);
-    if (!rows.length) throw new BadRequestException('CSV is empty');
-    const columns = Object.keys(rows[0]);
-    const norm = (h: string) => h.toLowerCase().replace(/[\s_.-]+/g, '');
-    const admCol = keyColumn && columns.includes(keyColumn) ? keyColumn : columns.find((h) => /^(admission(no|number)?|admno|adm|admissionid)$/.test(norm(h)));
-    const phoneCol = columns.find((h) => /^(phone|mobile|number|whatsapp|mobileno|phoneno|contact)$/.test(norm(h)));
-    const key = admCol ?? phoneCol;
-    if (!key) throw new BadRequestException(`CSV needs an "Admission No" (or "Phone") column. Found: ${columns.join(', ')}`);
-    const keyType: 'admission' | 'phone' = key === admCol ? 'admission' : 'phone';
-    const nameCol = columns.find((h) => /^(name|fullname|contactname|parentname)$/.test(norm(h))) ?? null;
-
-    const students = keyType === 'admission' ? await this.db.query<{ id: number; admission_no: string }>('select id, admission_no from students where active') : [];
-    const byAdm = new Map(students.map((s) => [stripZeros(s.admission_no), s.id]));
-
-    let matched = 0;
-    const unmatchedSamples: string[] = [];
+    if (c.status !== 'draft') throw new BadRequestException('The sheet can only be changed on a draft campaign');
+    if (!file) throw new BadRequestException('Choose a CSV or Excel file');
+    const rows = parseCsv(file.buffer, file.originalname);
+    if (!rows.length) throw new BadRequestException('The sheet has a header row but no data rows');
+    if (rows.length > 20_000) throw new BadRequestException(`The sheet has ${rows.length} rows — at most 20,000 per campaign`);
     await this.db.tx(async (tx) => {
       await tx.query('delete from campaign_rows where campaign_id=$1', [id]);
-      let i = 0;
-      for (const r of rows) {
-        i++;
-        const kv = String(r[key] ?? '').trim();
-        let studentId: number | null = null, ok = false;
-        if (keyType === 'admission') { studentId = byAdm.get(stripZeros(kv)) ?? null; ok = studentId !== null; }
-        else ok = !!normalizePhone(kv);
-        if (ok) matched++; else if (unmatchedSamples.length < 20) unmatchedSamples.push(`row ${i + 1}: ${kv || '(empty)'}`);
-        await tx.query('insert into campaign_rows(campaign_id, row_no, key_value, data, student_id, matched) values ($1,$2,$3,$4,$5,$6)',
-          [id, i, kv, r, studentId, ok]);
-      }
+      await tx.query(
+        `insert into campaign_rows(campaign_id, row_no, data, matched) select $1, n, d, false from unnest($2::jsonb[]) with ordinality as t(d, n)`,
+        [id, rows.map((r) => JSON.stringify(r))]);
     });
-    const info: CsvInfo = {
-      filename: file.originalname, keyColumn: key, keyType, nameColumn: nameCol, columns,
-      variables: columns.map(varName).filter(Boolean), rows: rows.length, matched, unmatched: rows.length - matched,
+    return this.mapCsv(id, opts, { filename: file.originalname, columns: Object.keys(rows[0]) });
+  }
+
+  /** (Re)matches the stored rows: which kind of sheet, which column is the admission no. / phone, which is the name. */
+  async mapCsv(id: number, opts: CsvMapping, fresh?: { filename: string; columns: string[] }) {
+    const c = await this.get(id);
+    if (c.status !== 'draft') throw new BadRequestException('The sheet can only be changed on a draft campaign');
+    const prev = c.audience.csv;
+    const filename = fresh?.filename ?? prev?.filename;
+    const rows = await this.db.query<{ id: number; row_no: number; data: Record<string, string> }>(
+      'select id, row_no, data from campaign_rows where campaign_id=$1 order by row_no', [id]);
+    if (!filename || !rows.length) throw new BadRequestException('Upload a sheet first');
+    const columns = fresh?.columns ?? prev?.columns ?? Object.keys(rows[0].data);
+    const data = rows.map((r) => r.data);
+    const val = (r: Record<string, string>, col: string) => String(r[col] ?? '').trim();
+
+    const students = await this.db.query<{ id: number; admission_no: string }>('select id, admission_no from students where active');
+    const byAdm = new Map(students.map((x) => [stripZeros(x.admission_no).toLowerCase(), x.id]));
+    const share = (col: string, test: (v: string) => boolean) => {
+      const vals = data.slice(0, 300).map((r) => val(r, col)).filter(Boolean);
+      return vals.length ? vals.filter(test).length / vals.length : 0;
     };
-    await this.db.query(`update campaigns set audience = jsonb_set(audience, '{csv}', $2::jsonb) where id=$1`, [id, JSON.stringify(info)]);
-    return { ...info, unmatchedSamples };
+    const admShare = (col: string) => share(col, (v) => byAdm.has(stripZeros(v).toLowerCase()));
+    const phoneShare = (col: string) => share(col, (v) => !!normalizePhone(v));
+    const norm = (h: string) => h.toLowerCase().replace(/[\s_.-]+/g, '');
+    const admHeader = (h: string) => /^(admission(no|number)?|admno|adm|admissionid|scholarno|srno)$/.test(norm(h));
+    // Best column by content (a matching heading helps); none when no column has a single usable value
+    const best = (score: (c: string) => number, header: (h: string) => boolean) =>
+      columns.map((col) => { const sc = score(col); return { col, s: sc ? sc + (header(col) ? 0.5 : 0) : 0 }; }).filter((x) => x.s > 0).sort((x, y) => y.s - x.s)[0];
+
+    // Which kind of sheet: asked for, else whatever the data says
+    let mode: CsvMode | undefined = opts.mode === 'admission' || opts.mode === 'phone' ? opts.mode : undefined;
+    if (!mode) {
+      const adm = best(admShare, admHeader), ph = detectPhoneColumns(data)[0];
+      mode = adm && adm.s >= 0.5 ? 'admission' : ph ? 'phone' : 'admission';
+    }
+    let keyColumn = opts.keyColumn && columns.includes(opts.keyColumn) ? opts.keyColumn
+      : prev?.keyType === mode && prev.keyColumn && columns.includes(prev.keyColumn) && !fresh ? prev.keyColumn
+      : mode === 'admission' ? best(admShare, admHeader)?.col
+      : detectPhoneColumns(data)[0]?.column ?? best(phoneShare, (h) => /phone|mobile|whatsapp|contact|number/i.test(h))?.col;
+    if (!keyColumn) {
+      throw new BadRequestException(mode === 'admission'
+        ? `No column has admission numbers of students in the app. Columns: ${columns.join(', ')}. If this is a list with phone numbers, choose "Sheet with phone numbers".`
+        : `No column has mobile numbers. Columns: ${columns.join(', ')}. If the sheet has admission numbers, choose "Sheet with admission numbers".`);
+    }
+    const nameColumn = mode === 'phone'
+      ? (opts.nameColumn === null || opts.nameColumn === '' ? null : opts.nameColumn && columns.includes(opts.nameColumn) ? opts.nameColumn
+        : !fresh && prev?.keyType === 'phone' && prev.nameColumn !== undefined ? prev.nameColumn ?? null : detectNameColumn(columns.filter((x) => x !== keyColumn)))
+      : null;
+
+    // Match every row
+    const seen = new Set<string>();
+    const unmatchedSamples: string[] = [];
+    let matched = 0, duplicates = 0;
+    const out = rows.map((r) => {
+      const kv = val(r.data, keyColumn!);
+      let studentId: number | null = null, ok = false, why = '';
+      if (mode === 'admission') {
+        studentId = kv ? byAdm.get(stripZeros(kv).toLowerCase()) ?? null : null;
+        ok = studentId !== null;
+        why = kv ? 'no student with this admission no.' : 'admission no. is empty';
+      } else {
+        const ph = normalizePhone(kv);
+        ok = !!ph;
+        why = kv ? 'not a valid mobile number' : 'number is empty';
+        if (ph) { if (seen.has(ph)) duplicates++; seen.add(ph); }
+      }
+      if (mode === 'admission' && studentId !== null) { if (seen.has(String(studentId))) duplicates++; seen.add(String(studentId)); }
+      if (ok) matched++;
+      else if (unmatchedSamples.length < 20) unmatchedSamples.push(`Row ${r.row_no + 1}: ${kv ? `"${kv.slice(0, 40)}"` : '(empty)'} — ${why}`);
+      return { id: r.id, kv, studentId, ok };
+    });
+    await this.db.query(
+      `update campaign_rows r set key_value = u.kv, student_id = u.sid, matched = u.ok
+       from unnest($1::int[], $2::text[], $3::int[], $4::bool[]) as u(id, kv, sid, ok) where r.id = u.id`,
+      [out.map((x) => x.id), out.map((x) => x.kv), out.map((x) => x.studentId), out.map((x) => x.ok)]);
+
+    const examples = Object.fromEntries(columns.map((col) => [col, data.map((r) => val(r, col)).find(Boolean)?.slice(0, 60) ?? '']));
+    const info: CsvInfo = {
+      filename, keyColumn, keyType: mode, nameColumn, columns,
+      variables: [...new Set(columns.map(varName).filter(Boolean))], rows: rows.length, matched, unmatched: rows.length - matched,
+      duplicates, examples, unmatchedSamples,
+    };
+    // A sheet replaces any classes / lists picked before
+    await this.db.query(`update campaigns set audience = jsonb_set(audience - 'groupIds', '{csv}', $2::jsonb) where id=$1`, [id, JSON.stringify(info)]);
+    return info;
   }
 
   async removeCsv(id: number) {

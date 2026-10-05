@@ -1,6 +1,6 @@
 import { Body, Controller, Delete, Get, Param, ParseIntPipe, Post, Put, Query, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { CampaignsService } from './campaigns.service';
+import { CampaignsService, CsvMapping } from './campaigns.service';
 import { Db } from '../db/db.service';
 import { checkTemplate } from './render';
 
@@ -17,9 +17,10 @@ export class CampaignsController {
 
   @Post(':id/csv')
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 5 * 1024 * 1024 } }))
-  csv(@Param('id', ParseIntPipe) id: number, @UploadedFile() file: Express.Multer.File, @Body('keyColumn') keyColumn?: string) {
-    return this.campaigns.uploadCsv(id, file, keyColumn);
+  csv(@Param('id', ParseIntPipe) id: number, @UploadedFile() file: Express.Multer.File, @Body() b: { mode?: string; keyColumn?: string; nameColumn?: string }) {
+    return this.campaigns.uploadCsv(id, file, { mode: b?.mode as CsvMapping['mode'], keyColumn: b?.keyColumn || undefined, nameColumn: b?.nameColumn });
   }
+  @Put(':id/csv') mapCsv(@Param('id', ParseIntPipe) id: number, @Body() b: CsvMapping) { return this.campaigns.mapCsv(id, b ?? {}); }
   @Delete(':id/csv') removeCsv(@Param('id', ParseIntPipe) id: number) { return this.campaigns.removeCsv(id); }
 
   @Get(':id/schedule') schedule(@Param('id', ParseIntPipe) id: number) { return this.campaigns.schedulePreview(id); }

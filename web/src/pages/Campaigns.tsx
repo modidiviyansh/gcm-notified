@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { api, fmtDate } from '../api';
 import { Badge, Empty, ErrorNote, Field, Modal, PageHeader, Progress, statusTone, useLoad, useToast } from '../components/ui';
 import { isTemplateSchedule } from '../components/schedule';
+import { Source, SourcePicker } from '../components/sheet';
 
 const MODE_LABEL: Record<string, string> = { spread: 'spread out', repeat: 'repeating', dated: 'date-based' };
 
@@ -13,11 +14,12 @@ export default function Campaigns() {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState('');
   const [kind, setKind] = useState<'contacts' | 'wa_groups'>('contacts');
+  const [source, setSource] = useState<Source>('lists');
 
   const create = async () => {
     try {
       const c = await api.post('/campaigns', { name, kind });
-      nav(`/campaigns/${c.id}/edit`);
+      nav(`/campaigns/${c.id}/edit${kind === 'contacts' && source !== 'lists' ? `?source=${source}` : ''}`);
     } catch (e) { toast((e as Error).message, 'error'); }
   };
 
@@ -51,16 +53,22 @@ export default function Campaigns() {
         </div>
       )}
 
-      <Modal open={creating} onClose={() => setCreating(false)} title="New campaign">
+      <Modal open={creating} onClose={() => setCreating(false)} title="New campaign" wide>
         <Field label="Name"><input className="input" autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Diwali wishes 2026" /></Field>
         <div className="mt-4 grid gap-3 sm:grid-cols-2">
-          {([['contacts', 'Contacts', 'Personal 1-to-1 messages to your contact lists, school classes or a CSV (marks, fees…).'],
+          {([['contacts', 'Personal messages', 'One-to-one messages to parents, staff or any list — from classes, your lists or an uploaded sheet.'],
              ['wa_groups', 'WhatsApp groups & channels', 'Post into groups your numbers are in, or channels they manage.']] as const).map(([k, t, d]) => (
             <button key={k} onClick={() => setKind(k)} className={`rounded-lg border p-3 text-left ${kind === k ? 'border-brand-600 bg-brand-50 ring-2 ring-brand-100' : 'border-slate-200 hover:bg-slate-50'}`}>
               <div className="text-sm font-medium">{t}</div><div className="mt-1 text-xs text-slate-500">{d}</div>
             </button>
           ))}
         </div>
+        {kind === 'contacts' && (
+          <div className="mt-4">
+            <span className="label">Who gets it?</span>
+            <SourcePicker value={source} onChange={setSource} />
+          </div>
+        )}
         <div className="mt-5 flex justify-end gap-2"><button className="btn-secondary" onClick={() => setCreating(false)}>Cancel</button><button className="btn-primary" onClick={create}>Continue</button></div>
       </Modal>
     </>

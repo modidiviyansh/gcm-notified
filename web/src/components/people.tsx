@@ -193,9 +193,9 @@ export function CsvImport({ groupId, onDone }: { groupId: number; onDone: (r: an
       <div>
         <p className="mb-3 text-sm text-slate-600">First row = column names. Any number of phone columns (Phone, Work Phone, Mobile 2…) — you label them in the next step. Every other column is saved with the person for this list and usable in messages, e.g. <code>Route</code> → <code>{'{{route}}'}</code>.</p>
         <label className="block cursor-pointer rounded-lg border-2 border-dashed border-slate-300 p-8 text-center hover:border-brand-600 hover:bg-brand-50">
-          <span className="text-sm font-medium text-brand-800">{busy ? 'Reading…' : 'Choose a CSV file'}</span>
-          <span className="mt-1 block text-xs text-slate-500">From Excel / Google Sheets: File → Download → CSV</span>
-          <input type="file" accept=".csv,text/csv" className="hidden" disabled={busy} onChange={(e) => pick(e.target.files?.[0])} />
+          <span className="text-sm font-medium text-brand-800">{busy ? 'Reading…' : 'Choose an Excel or CSV file'}</span>
+          <span className="mt-1 block text-xs text-slate-500">.xlsx straight from Excel, or CSV (Google Sheets: File → Download)</span>
+          <input type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" className="hidden" disabled={busy} onChange={(e) => pick(e.target.files?.[0])} />
         </label>
         <button className="mt-2 text-xs text-brand-700 hover:underline" onClick={() => {
           const blob = new Blob(['Name,Personal Phone,Work Phone,Department\nRamesh Kumar,9876543210,9811122233,Transport\n'], { type: 'text/csv' });

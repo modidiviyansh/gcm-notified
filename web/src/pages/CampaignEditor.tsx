@@ -1,10 +1,11 @@
 import { ReactNode, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, fmtDate, fmtDuration } from '../api';
 import { Badge, Card, Empty, ErrorNote, Field, Modal, MsOption, MultiSelect, PageHeader, statusLabel, Toggle, useLoad, useToast } from '../components/ui';
 import type { GroupNode } from './Contacts';
 import { describeRule, MessageType, RuleEditor, SCHOOL_LABEL, useLabels } from '../components/rules';
 import { describeSchedule, isTemplateSchedule, WhenPicker } from '../components/schedule';
+import { SheetPanel, Source, SOURCES, SourcePicker } from '../components/sheet';
 
 const STUDENT_VARS = ['student_name', 'first_name', 'admission_no', 'class', 'section', 'parent_name', 'father_name', 'mother_name', 'relation', 'child_count'];
 const PRESET_LABEL = { urgent: 'Urgent', normal: 'Normal', safe: 'Safe' } as const;
@@ -18,6 +19,9 @@ export default function CampaignEditor() {
   const { data: numbers } = useLoad(() => api.get<any[]>('/numbers'), []);
   const [preview, setPreview] = useState<any>(null);
   const [busy, setBusy] = useState(false);
+  const [params] = useSearchParams();
+  const asked = params.get('source') as Source | null;
+  const [source, setSource] = useState<Source | null>(null);
   const saveTimer = useRef<number | undefined>(undefined);
 
   useEffect(() => { if (c && c.status !== 'draft') nav(`/campaigns/${c.id}`, { replace: true }); }, [c?.status]);
@@ -84,11 +88,11 @@ export default function CampaignEditor() {
 
         <Step n={step++} title={isGroups ? 'Choose WhatsApp groups & channels' : 'Who receives it'}>
           {isGroups ? <WaGroupsPicker c={c} numbers={numbers ?? []} onChange={(waGroups) => patch({ audience: { waGroups } })} />
-            : <Audience c={c} type={type} primary={settings.primaryParent} onPatch={patch} onCsv={(info) => setData((o: any) => ({ ...o, audience: { ...o.audience, csv: info } }))} />}
+            : <Audience c={c} source={source ?? c.audience.csv?.keyType ?? (asked && SOURCES.some((x) => x.key === asked) ? asked : 'lists')} setSource={setSource} type={type} primary={settings.primaryParent} onPatch={patch} onCsv={(info) => { setData((o: any) => ({ ...o, audience: { ...o.audience, csv: info, ...(info ? { groupIds: [] } : {}) } })); setPreview(null); }} />}
         </Step>
 
         <Step n={step++} title="Message">
-          <MessageEditor c={c} onPatch={patch} isGroups={isGroups} />
+          <MessageEditor c={c} onPatch={patch} isGroups={isGroups} phoneList={(source ?? c.audience.csv?.keyType ?? asked) === 'phone'} />
         </Step>
 
         <Step n={step++} title="Sending">
@@ -165,53 +169,43 @@ function Step({ n, title, children }: { n: number; title: string; children: Reac
   );
 }
 
-function Audience({ c, type, primary, onPatch, onCsv }: { c: any; type: MessageType | null; primary: string; onPatch: (p: any, i?: boolean) => void; onCsv: (info: any) => void }) {
+function Audience({ c, source, setSource, type, primary, onPatch, onCsv }: { c: any; source: Source; setSource: (s: Source) => void; type: MessageType | null; primary: string; onPatch: (p: any, i?: boolean) => void; onCsv: (info: any) => void }) {
   const toast = useToast();
   const { data: tree } = useLoad(() => api.get<GroupNode[]>('/groups'), []);
-  const [csvReport, setCsvReport] = useState<any>(null);
   const ids: number[] = c.audience.groupIds ?? [];
   const csv = c.audience.csv;
 
   const setIds = (next: number[]) => onPatch({ audience: { groupIds: normaliseIds(next, tree ?? []) } }, true);
-  const schoolPicked = ids.some((id) => (tree ?? []).some((g) => g.source === 'frappe' && (g.id === id || g.children.some((c) => c.id === id))));
+  const schoolPicked = !csv && ids.some((id) => (tree ?? []).some((g) => g.source === 'frappe' && (g.id === id || g.children.some((c) => c.id === id))));
   const listsPicked = !csv && ids.some((id) => (tree ?? []).some((g) => g.source === 'manual' && (g.id === id || g.children.some((c) => c.id === id))));
   const { all: labels } = useLabels();
-  const upload = async (f?: File) => {
-    if (!f) return;
-    try { const r = await api.upload(`/campaigns/${c.id}/csv`, f); setCsvReport(r); onCsv(r); toast(`CSV: ${r.matched} of ${r.rows} rows matched`); } catch (e) { toast((e as Error).message, 'error'); }
+
+  const choose = async (next: Source) => {
+    if (next === source) return;
+    if (csv && next === 'lists') {
+      if (!confirm('Remove the uploaded sheet and pick classes or lists instead?')) return;
+      await api.del(`/campaigns/${c.id}/csv`); onCsv(null);
+    } else if (csv) {
+      // Same file, read the other way (admission numbers ↔ phone numbers)
+      try { onCsv(await api.put(`/campaigns/${c.id}/csv`, { mode: next })); } catch (e) { toast((e as Error).message, 'error'); return; }
+    } else if (next !== 'lists' && ids.length) {
+      onPatch({ audience: { groupIds: [] } }, true);
+      toast('Class / list selection cleared — this campaign will use your sheet');
+    }
+    setSource(next);
   };
-  const clearCsv = async () => { await api.del(`/campaigns/${c.id}/csv`); setCsvReport(null); onCsv(null); };
 
   return (
     <div className="space-y-5">
-      <div className="grid gap-5 md:grid-cols-2">
-        <div className={csv ? 'pointer-events-none opacity-40' : ''}>
-          <span className="label">Contact lists, classes & sections {csv && '(CSV is used instead)'}</span>
+      <SourcePicker value={source} onChange={choose} />
+      {source === 'lists' ? (
+        <div className="max-w-2xl">
           <ListPicker tree={tree ?? []} ids={ids} onChange={setIds} />
           <p className="mt-1.5 text-xs text-slate-500">Pick any mix of your own lists and school classes or sections. A person in several lists gets the message once.</p>
         </div>
-        <div>
-          <span className="label">…or upload a CSV (marks, fee dues, custom lists)</span>
-          {csv ? (
-            <div className="rounded-lg border border-slate-200 p-3 text-sm">
-              <div className="flex items-center justify-between"><b>{csv.filename}</b><button className="text-xs text-red-600 hover:underline" onClick={clearCsv}>Remove</button></div>
-              <div className="mt-1 text-slate-600">Matched by <b>{csv.keyColumn}</b> ({csv.keyType === 'admission' ? 'admission no.' : 'phone'}): <b className="text-emerald-700">{csv.matched}</b> of {csv.rows} rows
-                {csv.unmatched > 0 && <span className="text-red-600"> · {csv.unmatched} not matched</span>}</div>
-              {csvReport?.unmatchedSamples?.length > 0 && <div className="mt-1 text-xs text-red-600">{csvReport.unmatchedSamples.slice(0, 5).join(' · ')}</div>}
-              <div className="mt-2 flex flex-wrap gap-1">{csv.variables.map((v: string) => <code key={v} className="rounded bg-slate-100 px-1.5 py-0.5 text-xs">{`{{${v}}}`}</code>)}</div>
-            </div>
-          ) : (
-            <div className="rounded-lg border border-dashed border-slate-300 p-4 text-sm">
-              <input type="file" accept=".csv,text/csv" onChange={(e) => upload(e.target.files?.[0])} className="block w-full text-sm file:mr-3 file:rounded-lg file:border-0 file:bg-brand-50 file:px-3 file:py-2 file:text-brand-800" />
-              <p className="mt-2 text-xs text-slate-500">First row = headers. Include an <b>Admission No</b> column (or <b>Phone</b> for non-students). Every column becomes a variable, e.g. <code>Marks</code> → <code>{'{{marks}}'}</code>.</p>
-              <button className="mt-2 text-xs text-brand-700 hover:underline" onClick={() => {
-                const blob = new Blob(['Admission No,Subject,Test,Test Date,Marks,Max Marks\n10001,Maths,Unit Test 2,02-10-2026,42,50\n'], { type: 'text/csv' });
-                const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'marks-template.csv'; a.click();
-              }}>Download a sample marks CSV</button>
-            </div>
-          )}
-        </div>
-      </div>
+      ) : (
+        <SheetPanel mode={source} campaignId={c.id} csv={csv} onCsv={onCsv} />
+      )}
 
       {listsPicked && (
         <div className="grid gap-4 md:grid-cols-2">
@@ -222,7 +216,7 @@ function Audience({ c, type, primary, onPatch, onCsv }: { c: any; type: MessageT
         </div>
       )}
 
-      {(schoolPicked || csv?.keyType === 'admission') && (
+      {(schoolPicked || (source === 'admission' && csv?.keyType === 'admission')) && (
         <div className="grid gap-4 md:grid-cols-2">
           <Field label="Send to" hint={c.recipient_mode === 'primary' ? `Primary = ${primary}, falling back to the other parent if missing. Change in Settings.` : undefined}>
             <select className="input" value={c.recipient_mode} onChange={(e) => onPatch({ recipient_mode: e.target.value }, true)}>
@@ -384,19 +378,19 @@ function WaGroupsPicker({ c, numbers, onChange }: { c: any; numbers: any[]; onCh
   );
 }
 
-function MessageEditor({ c, onPatch, isGroups }: { c: any; onPatch: (p: any, i?: boolean) => void; isGroups: boolean }) {
+function MessageEditor({ c, onPatch, isGroups, phoneList }: { c: any; onPatch: (p: any, i?: boolean) => void; isGroups: boolean; phoneList: boolean }) {
   const toast = useToast();
   const ref = useRef<HTMLTextAreaElement>(null);
   const { data: templates, reload } = useLoad(() => api.get<any[]>('/templates'), []);
   const [media, setMedia] = useState<any>(null);
   useEffect(() => { if (c.media_id) api.get<any[]>('/media').then((l) => setMedia(l.find((m) => m.id === c.media_id) ?? null)); else setMedia(null); }, [c.media_id]);
 
-  const vars = useMemo(() => {
+  const sheetVars: string[] = isGroups ? [] : c.audience.csv?.variables ?? [];
+  const baseVars = useMemo(() => {
     if (isGroups) return ['group_name'];
-    const csvVars: string[] = c.audience.csv?.variables ?? [];
-    if (c.audience.csv?.keyType === 'phone') return ['name', ...csvVars];
-    return [...STUDENT_VARS, ...csvVars];
-  }, [c.audience.csv, isGroups]);
+    if (phoneList) return ['name', 'phone'];
+    return STUDENT_VARS;
+  }, [phoneList, isGroups]);
 
   const insert = (text: string) => {
     const el = ref.current; if (!el) return;
@@ -425,7 +419,9 @@ function MessageEditor({ c, onPatch, isGroups }: { c: any; onPatch: (p: any, i?:
           <button className="btn-ghost" onClick={saveTemplate} disabled={!c.body.trim()}>Save as template</button>
         </div>
         <textarea ref={ref} className="input min-h-56 font-mono text-[13px] leading-relaxed" value={c.body} onChange={(e) => onPatch({ body: e.target.value })}
-          placeholder={'{Dear|Respected} Parent of {{student_name}},\n\nThe school will remain closed on 20 Oct for Diwali.\n\nRegards,\nGCM Convent School'} />
+          placeholder={phoneList
+            ? 'Dear {{name}},\n\nYou are invited to {{event}} on {{date}}.\n\nRegards,\nGCM Convent School'
+            : '{Dear|Respected} Parent of {{student_name}},\n\nThe school will remain closed on 20 Oct for Diwali.\n\nRegards,\nGCM Convent School'} />
         <div className="mt-1 text-xs text-slate-500">{c.body.length} characters · *bold* _italic_ ~strike~ · <code>{'{A|B|C}'}</code> picks one at random per message (makes every message slightly different)</div>
         <div className="mt-3 flex flex-wrap items-center gap-3">
           {media ? (
@@ -442,11 +438,19 @@ function MessageEditor({ c, onPatch, isGroups }: { c: any; onPatch: (p: any, i?:
         </div>
       </div>
       <div>
-        <span className="label">Insert a variable</span>
+        {sheetVars.length > 0 && (
+          <>
+            <span className="label">From your sheet</span>
+            <div className="mb-3 flex flex-wrap gap-1.5">
+              {sheetVars.map((v) => <button key={v} className="rounded-md bg-brand-50 px-2 py-1 font-mono text-xs text-brand-800 hover:bg-brand-100" onClick={() => insert(`{{${v}}}`)}>{v}</button>)}
+            </div>
+          </>
+        )}
+        <span className="label">{isGroups ? 'Insert a variable' : phoneList ? 'From the row' : 'From school records'}</span>
         <div className="flex flex-wrap gap-1.5">
-          {vars.map((v) => <button key={v} className="rounded-md bg-slate-100 px-2 py-1 font-mono text-xs hover:bg-brand-50" onClick={() => insert(`{{${v}}}`)}>{v}</button>)}
+          {baseVars.map((v) => <button key={v} className="rounded-md bg-slate-100 px-2 py-1 font-mono text-xs hover:bg-brand-50" onClick={() => insert(`{{${v}}}`)}>{v}</button>)}
         </div>
-        {!isGroups && c.audience.csv?.keyType !== 'phone' && (
+        {!isGroups && !phoneList && (
           <>
             <span className="label mt-4">Siblings block</span>
             <button className="w-full rounded-md bg-slate-100 px-2 py-1.5 text-left font-mono text-xs hover:bg-brand-50"
